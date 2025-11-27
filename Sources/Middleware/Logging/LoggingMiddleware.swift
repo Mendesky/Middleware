@@ -18,7 +18,7 @@ public struct LoggingMiddleware: MiddlewareProtocol {
     
     package init(){ }
     
-    package func handle(_ input: HummingbirdCore.Request, context: BasicRequestContext, next: (HummingbirdCore.Request, BasicRequestContext) async throws -> HummingbirdCore.Response) async throws -> HummingbirdCore.Response {
+    public func handle(_ input: HummingbirdCore.Request, context: BasicRequestContext, next: (HummingbirdCore.Request, BasicRequestContext) async throws -> HummingbirdCore.Response) async throws -> HummingbirdCore.Response {
         logger.debug(">>>: \(input.method.rawValue) \(String(describing: input.uri.path))")
         do {
             let response = try await next(input, context)
