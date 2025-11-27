@@ -11,8 +11,8 @@ import NIOConcurrencyHelpers
 import HTTPTypes
 
 
-fileprivate struct SetCookies {
-    package class Management: @unchecked Sendable {
+public struct SetCookies {
+    public class Management: @unchecked Sendable {
         var _cookies: NIOLockedValueBox<[Cookie]> = .init([])
         var _cookiesToRemove: NIOLockedValueBox<[String]> = .init([])
         var _headers: NIOLockedValueBox<[HTTPField]> = .init([])
@@ -39,7 +39,7 @@ fileprivate struct SetCookies {
     // work-around until cookies are supported though openapi-generator
     // https://github.com/apple/swift-openapi-generator/issues/38
     /// Collects cookies and send them via the
-    package static var management: Management {
+    public static var management: Management {
         precondition(Self._management != nil, "SetCookies.management called outside request handling task, make sure SetCookieMiddleware is used!")
         return Self._management!
     }
