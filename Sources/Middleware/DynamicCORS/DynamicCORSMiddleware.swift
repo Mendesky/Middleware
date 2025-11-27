@@ -11,14 +11,14 @@ import HTTPTypes
 public struct DynamicCORSMiddleware<Context: RequestContext>: RouterMiddleware {
     public let allowedOrigins: Set<String>
     public let allowedMethods: Set<HTTPRequest.Method>
-    public let allowedHeaders: Set<String>
+    public let allowedHeaders: Set<HTTPField.Name>
     public let allowCredentials: Bool
     public let maxAge: Int?
 
     public init(
         allowedOrigins: Set<String>,
         allowedMethods: Set<HTTPRequest.Method> = [.get, .post, .put, .delete, .options],
-        allowedHeaders: Set<String> = ["content-type", "authorization"],
+        allowedHeaders: Set<HTTPField.Name> = [.contentType, .authorization],
         allowCredentials: Bool = true,
         maxAge: Int? = 3600
     ) {
@@ -53,7 +53,7 @@ public struct DynamicCORSMiddleware<Context: RequestContext>: RouterMiddleware {
                 response.headers[.accessControlAllowMethods] = allowedMethods
                     .map(\.rawValue)
                     .joined(separator: ", ")
-                response.headers[.accessControlAllowHeaders] = allowedHeaders.joined(separator: ", ")
+                response.headers[.accessControlAllowHeaders] = allowedHeaders.map(\.rawName).joined(separator: ", ")
                 if allowCredentials {
                     response.headers[.accessControlAllowCredentials] = "true"
                 }
