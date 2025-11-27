@@ -48,6 +48,7 @@ fileprivate struct SetCookies {
 /// Provides Response.setCookies and attaches all added cookies to the response header
 public struct SetCookieMiddleware: MiddlewareProtocol {
     let presetKeys: [(cookie: String, header: String)]
+    
     public init(presetKeys: [(cookie: String, header: String)]) {
         self.presetKeys = presetKeys
     }

@@ -15,8 +15,7 @@ public struct LoggingMiddleware: MiddlewareProtocol {
     
     let logger: Logger = .init(label: "IdentityContext.LoggingMiddleware")
     
-    
-    package init(){ }
+    public init(){ }
     
     public func handle(_ input: HummingbirdCore.Request, context: BasicRequestContext, next: (HummingbirdCore.Request, BasicRequestContext) async throws -> HummingbirdCore.Response) async throws -> HummingbirdCore.Response {
         logger.debug(">>>: \(input.method.rawValue) \(String(describing: input.uri.path))")
