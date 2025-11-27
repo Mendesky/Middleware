@@ -8,7 +8,7 @@ import Foundation
 import Logging
 import Hummingbird
 
-package struct LoggingMiddleware: MiddlewareProtocol {
+public struct LoggingMiddleware: MiddlewareProtocol {
     public typealias Input = Request
     public typealias Output = Response
     public typealias Context = BasicRequestContext

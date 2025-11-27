@@ -8,14 +8,14 @@
 import Hummingbird
 import HTTPTypes
 
-struct DynamicCORSMiddleware<Context: RequestContext>: RouterMiddleware {
-    let allowedOrigins: Set<String>
-    let allowedMethods: Set<HTTPRequest.Method>
-    let allowedHeaders: Set<String>
-    let allowCredentials: Bool
-    let maxAge: Int?
+public struct DynamicCORSMiddleware<Context: RequestContext>: RouterMiddleware {
+    public let allowedOrigins: Set<String>
+    public let allowedMethods: Set<HTTPRequest.Method>
+    public let allowedHeaders: Set<String>
+    public let allowCredentials: Bool
+    public let maxAge: Int?
 
-    init(
+    public init(
         allowedOrigins: Set<String>,
         allowedMethods: Set<HTTPRequest.Method> = [.get, .post, .put, .delete, .options],
         allowedHeaders: Set<String> = ["content-type", "authorization"],
@@ -29,7 +29,7 @@ struct DynamicCORSMiddleware<Context: RequestContext>: RouterMiddleware {
         self.maxAge = maxAge
     }
 
-    func handle(
+    public func handle(
         _ request: Request,
         context: Context,
         next: (Request, Context) async throws -> Response

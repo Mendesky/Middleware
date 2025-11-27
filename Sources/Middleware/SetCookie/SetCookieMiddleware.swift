@@ -11,7 +11,7 @@ import NIOConcurrencyHelpers
 import HTTPTypes
 
 
-package struct SetCookies {
+fileprivate struct SetCookies {
     package class Management: @unchecked Sendable {
         var _cookies: NIOLockedValueBox<[Cookie]> = .init([])
         var _cookiesToRemove: NIOLockedValueBox<[String]> = .init([])
