@@ -11,6 +11,8 @@ import Hummingbird
 
 public struct AccessTokenMiddleware: ClientMiddleware {
     
+    public init(){}
+    
     public func intercept(_ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String, next: (HTTPRequest, HTTPBody?, URL) async throws -> (HTTPResponse, HTTPBody?)) async throws -> (HTTPResponse, HTTPBody?) {
         
         guard let authorizationHeader = request.headerFields.first(where: { $0.name == .authorization }) else {
