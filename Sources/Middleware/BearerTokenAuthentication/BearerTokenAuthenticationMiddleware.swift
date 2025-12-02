@@ -52,7 +52,12 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     
     public func handle(_ input: HummingbirdCore.Request, context: BasicRequestContext, next: (HummingbirdCore.Request, BasicRequestContext) async throws -> HummingbirdCore.Response) async throws -> HummingbirdCore.Response {
         guard let authorization = input.headers.first(where: { $0.name == .authorization }) else {
-            return Response.init(status: .unauthorized)
+            let responseBodyString = "access token loss in header."
+            let responseBody = ResponseBody(contentLength: responseBodyString.count) { writer in
+                try await writer.write(.init(string: responseBodyString))
+                try await writer.finish(nil)
+            }
+            return Response.init(status: .unauthorized, body: responseBody)
         }
         
         guard authorization.value.hasPrefix("Bearer "),
@@ -62,7 +67,12 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         
         do{
             guard let payload = try self.verification.decrypt(compactString: token) else{
-                return Response.init(status: .unauthorized)
+                let responseBodyString = "access token decrypt failed."
+                let responseBody = ResponseBody(contentLength: responseBodyString.count) { writer in
+                    try await writer.write(.init(string: responseBodyString))
+                    try await writer.finish(nil)
+                }
+                return Response.init(status: .unauthorized, body: responseBody)
             }
             guard let fieldKey = HTTPField.Name.init("userId"), let userId = input.headers.first(where: { $0.name == fieldKey}) else {
                 return Response.init(status: .badRequest)
@@ -75,8 +85,13 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
             return try await next(input, context)
             
         }catch let error as JWE.JWEError{
-            logger.error("Decrypt accessToken failed: \(error)", metadata: ["accesstoken": .string(token)])
-            return Response.init(status: .unauthorized)
+            let responseBodyString = "JWEError: \(error)"
+            logger.error(.init(stringLiteral: responseBodyString), metadata: ["accesstoken": .string(token)])
+            let responseBody = ResponseBody(contentLength: responseBodyString.count) { writer in
+                try await writer.write(.init(string: responseBodyString))
+                try await writer.finish(nil)
+            }
+            return Response.init(status: .unauthorized, body: responseBody)
         }catch{
             logger.error("The error happened when verified accessToken: \(error)", metadata: ["accesstoken": .string(token)])
             return Response.init(status: .serviceUnavailable, body: .init(byteBuffer: .init(string: "unknown error: \(error)")))
