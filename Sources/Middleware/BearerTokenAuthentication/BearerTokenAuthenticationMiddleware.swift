@@ -23,14 +23,14 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     let logger: Logger = .init(label: "IdentityContext.BearerTokenAuthenticationMiddleware")
     let verification: AccessTokenVerification
     let whitelistedPaths: Set<String>
-
+    
     /// from environment
     /// MENDESKY_AUTH_RECIPIENT_JWK: The base64 json encoded string from JWK for recipient.
     /// MENDESKY_AUTH_RECIPIENT_JWK_PATH: The file path of JWK JSON context  for recipient.
     /// MENDESKY_AUTH_SENDER_JWK: (optional) The base64 json encoded string from JWK for sender.
     /// MENDESKY_AUTH_SENDER_JWK_PATH: (optional) The file path of JWK JSON context  for sender.
     /// MENDESKY_AUTH_PASSWORD: (optional) JWK password for AUTH if needed.
-    public init(whitelistedPaths: Set<String> = []) throws {
+    public init(whitelistedPaths: Set<String>) throws {
         let env = Environment()
 
         let recipientKeyData = try env.get("MENDESKY_AUTH_RECIPIENT_JWK_PATH").map{ try Data(contentsOf: URL(filePath: $0)) } ?? env.get("MENDESKY_AUTH_RECIPIENT_JWK").flatMap{ Data(base64Encoded: .init($0.utf8)) }
