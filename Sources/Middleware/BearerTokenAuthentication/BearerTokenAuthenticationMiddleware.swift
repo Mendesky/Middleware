@@ -10,6 +10,7 @@ import Hummingbird
 import JSONWebKey
 import JSONWebEncryption
 import HTTPTypes
+import RegexBuilder
 
 public enum BearerTokenAuthenticationMiddlewareError: Error {
     case  recipientKeyNotFoundInEnvironment
@@ -23,6 +24,7 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     let logger: Logger = .init(label: "IdentityContext.BearerTokenAuthenticationMiddleware")
     let verification: AccessTokenVerification
     let whitelistedPaths: Set<String>
+    let whitelistedPatterns: [Regex<AnyRegexOutput>]
 
     /// from environment
     /// MENDESKY_AUTH_RECIPIENT_JWK: The base64 json encoded string from JWK for recipient.
@@ -30,7 +32,7 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     /// MENDESKY_AUTH_SENDER_JWK: (optional) The base64 json encoded string from JWK for sender.
     /// MENDESKY_AUTH_SENDER_JWK_PATH: (optional) The file path of JWK JSON context  for sender.
     /// MENDESKY_AUTH_PASSWORD: (optional) JWK password for AUTH if needed.
-    public init(whitelistedPaths: Set<String> = []) throws {
+    public init(whitelistedPaths: Set<String> = [], whitelistedPatterns: [Regex<AnyRegexOutput>] = []) throws {
         let env = Environment()
 
         let recipientKeyData = try env.get("MENDESKY_AUTH_RECIPIENT_JWK_PATH").map{ try Data(contentsOf: URL(filePath: $0)) } ?? env.get("MENDESKY_AUTH_RECIPIENT_JWK").flatMap{ Data(base64Encoded: .init($0.utf8)) }
@@ -46,17 +48,24 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         let password = env.get("MENDESKY_AUTH_PASSWORD").flatMap{ Data(base64Encoded: .init($0.utf8)) }
         self.verification = try AccessTokenVerification(senderKey: senderKeyData, recipientKey: recipientKeyData, password: password)
         self.whitelistedPaths = whitelistedPaths
+        self.whitelistedPatterns = whitelistedPatterns
     }
 
-    public init(verification: AccessTokenVerification, whitelistedPaths: Set<String> = []) {
+    public init(verification: AccessTokenVerification, whitelistedPaths: Set<String> = [], whitelistedPatterns: [Regex<AnyRegexOutput>] = []) {
         self.verification = verification
         self.whitelistedPaths = whitelistedPaths
+        self.whitelistedPatterns = whitelistedPatterns
+    }
+
+    private func isWhitelisted(_ path: String) -> Bool {
+        if whitelistedPaths.contains(path) { return true }
+        return whitelistedPatterns.contains { (try? $0.wholeMatch(in: path)) != nil }
     }
 
     public func handle(_ input: HummingbirdCore.Request, context: BasicRequestContext, next: (HummingbirdCore.Request, BasicRequestContext) async throws -> HummingbirdCore.Response) async throws -> HummingbirdCore.Response {
         // Skip authentication for whitelisted paths and OPTIONS (CORS preflight)
         let path = input.uri.path
-        if input.method == .options || whitelistedPaths.contains(path) {
+        if input.method == .options || isWhitelisted(path) {
             return try await next(input, context)
         }
 
