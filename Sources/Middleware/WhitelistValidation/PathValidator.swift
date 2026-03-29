@@ -18,6 +18,11 @@ public struct PathValidator: WhitelistValidator {
         matcher = Matcher { (try? regex.wholeMatch(in: $0)) != nil }
     }
 
+    public init<Output>(@RegexComponentBuilder _ build: () -> some RegexComponent<Output>) {
+        let component = build()
+        matcher = Matcher { (try? component.regex.wholeMatch(in: $0)) != nil }
+    }
+
     public func isWhitelisted(_ request: Request) -> Bool {
         matcher(request.uri.path)
     }
