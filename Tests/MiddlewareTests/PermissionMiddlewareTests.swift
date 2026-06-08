@@ -59,6 +59,9 @@ private func pathRule(_ pattern: String, methods: Set<HTTPRequest.Method>? = nil
 }
 
 @Suite struct PermissionMiddlewareTests {
+    /// 有所需權限 → 放行。
+    /// 規則要求 `business:read`，provider 回傳的權限集合含 `business:read`，
+    /// 帶著有效 token 打受保護路由 → 預期 200 OK（成功通過 middleware 進到 handler）。
     @Test func allowsWhenProviderReturnsRequiredPermission() async throws {
         let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
         let app = makeApp(rules: [rule], provider: providerReturning(["business:read", "other:thing"]))
@@ -69,6 +72,9 @@ private func pathRule(_ pattern: String, methods: Set<HTTPRequest.Method>? = nil
         }
     }
 
+    /// 缺所需權限 → 擋下。
+    /// token 有效，但 provider 回傳的權限不含 `business:read` → 預期 403 Forbidden
+    /// （已認證、但沒有這個權限，屬「授權」失敗，不是「認證」失敗）。
     @Test func forbidsWhenProviderLacksRequiredPermission() async throws {
         let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
         let app = makeApp(rules: [rule], provider: providerReturning(["something:else"]))
@@ -79,17 +85,22 @@ private func pathRule(_ pattern: String, methods: Set<HTTPRequest.Method>? = nil
         }
     }
 
+    /// 命中規則但沒帶 token → 401。
+    /// 路由有權限規則，但請求沒有 Authorization header（拿不到可信的 userId）→ 預期 401 Unauthorized。
+    /// 此情況不會去呼叫 provider（連是誰都不知道，無從查權限）。
     @Test func unauthorizedWhenTokenMissing() async throws {
         let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
         let app = makeApp(rules: [rule], provider: providerReturning(["business:read"]))
         try await app.test(.router) { client in
-            let res = try await client.execute(uri: "/quotations/123", method: .get)  // no Authorization header
+            let res = try await client.execute(uri: "/quotations/123", method: .get)  // 沒有 Authorization header
             #expect(res.status == .unauthorized)
         }
     }
 
+    /// provider（IAMContext 查詢）失敗 → fail-closed 不放行，回 502。
+    /// 查不到權限時寧可擋下也不放行；用 502 Bad Gateway 而非 503，
+    /// 是要把「上游依賴故障」跟「本服務自身故障」在 log/告警上區分開。
     @Test func badGatewayWhenProviderFails() async throws {
-        // fail-closed: provider error must not allow the request through; 502 (upstream dependency failed).
         let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
         let app = makeApp(rules: [rule], provider: FailingProvider())
         let token = try makeToken(userId: "u1")
@@ -99,9 +110,11 @@ private func pathRule(_ pattern: String, methods: Set<HTTPRequest.Method>? = nil
         }
     }
 
+    /// 沒有規則涵蓋的路由 → 直接放行。
+    /// `/public/info` 不符合任何規則 → middleware 不介入（不需 token、也不會去查 provider）→ 預期 200。
     @Test func passesWhenNoRuleCoversPath() async throws {
         let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
-        // No token, provider not consulted — an unprotected path must still pass.
+        // 不帶 token、provider 不會被呼叫；非受保護路由仍應放行。
         let app = makeApp(rules: [rule], provider: providerReturning([]))
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/public/info", method: .get)
@@ -109,29 +122,38 @@ private func pathRule(_ pattern: String, methods: Set<HTTPRequest.Method>? = nil
         }
     }
 
+    /// HTTP method 過濾：規則只管 GET，對同路徑的 POST 不適用。
+    /// 規則 `methods: [.get]`，但打的是 POST → 不被此規則涵蓋，middleware 不介入。
+    /// （沒註冊 POST handler，最終由 router 回 404；重點是「不會被權限擋成 401/403」。）
     @Test func methodFilterExcludesNonMatchingVerb() async throws {
         let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
         let app = makeApp(rules: [rule], provider: providerReturning([]))
         try await app.test(.router) { client in
-            let res = try await client.execute(uri: "/quotations/123", method: .post)  // rule covers GET only
+            let res = try await client.execute(uri: "/quotations/123", method: .post)  // 規則只涵蓋 GET
             #expect(res.status != .unauthorized)
             #expect(res.status != .forbidden)
         }
     }
 
+    /// OPTIONS（CORS preflight）一律略過權限檢查。
+    /// 即使路徑命中規則、即使沒帶 token，OPTIONS 也不該被擋（不會 401/403）——
+    /// 規則用不限 method 的 `/secure`，故意湊出「會命中」的條件來驗證 OPTIONS 仍被略過。
     @Test func skipsOptionsEvenWhenRuleMatches() async throws {
-        let rule = try pathRule("/secure", requires: ["x"])  // any method
+        let rule = try pathRule("/secure", requires: ["x"])  // 不限 method
         let app = makeApp(rules: [rule], provider: providerReturning([]))
         try await app.test(.router) { client in
-            let res = try await client.execute(uri: "/secure", method: .options)  // no token
+            let res = try await client.execute(uri: "/secure", method: .options)  // 沒帶 token
             #expect(res.status != .unauthorized)
             #expect(res.status != .forbidden)
         }
     }
 
+    /// 一條規則列多個權限時採 AND（要全部具備才放行）。
+    /// 規則要求 `business:read` + `business:write`，但 provider 只回 `business:read`
+    /// （缺 `business:write`）→ 預期 403。
     @Test func multipleRequiredPermissionsNeedAll() async throws {
         let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read", "business:write"])
-        let app = makeApp(rules: [rule], provider: providerReturning(["business:read"]))  // missing business:write
+        let app = makeApp(rules: [rule], provider: providerReturning(["business:read"]))  // 缺 business:write
         let token = try makeToken(userId: "u1")
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/quotations/123", method: .get, headers: bearer(token))
