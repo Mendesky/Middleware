@@ -60,10 +60,12 @@ public actor CachingPermissionsProvider: PermissionsProvider {
         }
 
         let fresh = try await upstream.permissions(forUserId: userId)
+        // Stamp with the post-await time so the upstream call's latency isn't charged against the TTL.
+        let storedAt = clock.now
 
         if let freshness = cacheableTTL(for: fresh), freshness > .zero {
-            evictIfAtCapacity(for: userId, now: now)
-            cache[userId] = Entry(permissions: fresh, storedAt: now)
+            evictIfAtCapacity(for: userId, now: storedAt)
+            cache[userId] = Entry(permissions: fresh, storedAt: storedAt)
         }
         return fresh
     }
