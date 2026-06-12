@@ -55,13 +55,24 @@ private func bearer(_ token: String) -> HTTPFields {
 
 // MARK: - IAMContext seeding helpers
 
+private struct SeedError: Error, CustomStringConvertible {
+    let statusCode: Int
+    let body: String
+    var description: String { "seedProfile failed: HTTP \(statusCode) — \(body)" }
+}
+
 private func seedProfile(baseURL: String, employeeAccessId: String, userId: String) async throws {
     var req = URLRequest(url: URL(string: "\(baseURL)/employee-access/\(employeeAccessId)/create-user-access-profile")!)
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     req.setValue("seed-op", forHTTPHeaderField: "operatorId")
     req.httpBody = try JSONEncoder().encode(["userId": userId, "department": "engineering", "jobTitle": "engineer"])
-    _ = try await URLSession.shared.data(for: req)
+    let (data, response) = try await URLSession.shared.data(for: req)
+    let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+    guard (200...299).contains(status) else {
+        // Fail fast with the real cause, instead of a confusing empty-permissions timeout later.
+        throw SeedError(statusCode: status, body: String(data: data, encoding: .utf8) ?? "")
+    }
 }
 
 /// Polls until the projection has ingested the seeded profile (eventual consistency, ~1-2s observed).
@@ -75,8 +86,8 @@ private func waitForPermissions(baseURL: String, userId: String) async throws ->
     return []
 }
 
-private func makeApp(baseURL: String) throws -> some ApplicationProtocol {
-    let rule = PermissionRule(PathValidator(try Regex("/quotations/.+")), methods: [.get], requires: ["business:read"])
+private func makeApp(baseURL: String, requiring required: [String]) throws -> some ApplicationProtocol {
+    let rule = PermissionRule(PathValidator(try Regex("/quotations/.+")), methods: [.get], requires: required)
     let router = Router()
     router.add(middleware: PermissionMiddleware(rules: [rule], provider: HTTPPermissionsProvider(baseURL: baseURL), verification: makeVerification()))
     router.get("quotations/:id") { _, _ in "ok" }
@@ -92,9 +103,11 @@ private func makeApp(baseURL: String) throws -> some ApplicationProtocol {
 
         try await seedProfile(baseURL: base, employeeAccessId: empId, userId: userId)
         let perms = try await waitForPermissions(baseURL: base, userId: userId)
-        #expect(perms.contains("business:read"))  // default allPermissions includes it
+        // Derive the required permission from whatever IAM actually grants, so this test does not
+        // hard-code (and break with) IAMContext's evolving permission vocabulary.
+        let required = try #require(perms.first, "seeded user should have at least one permission")
 
-        let app = try makeApp(baseURL: base)
+        let app = try makeApp(baseURL: base, requiring: [required])
         let token = try makeToken(userId: userId)
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/quotations/1", method: .get, headers: bearer(token))
@@ -107,7 +120,7 @@ private func makeApp(baseURL: String) throws -> some ApplicationProtocol {
         let base = LiveIAM.baseURL!
         let userId = "ghost-\(UUID().uuidString.prefix(8))"  // never seeded -> IAM 404 -> [] -> denied
 
-        let app = try makeApp(baseURL: base)
+        let app = try makeApp(baseURL: base, requiring: ["any:permission"])  // ghost has none -> 403
         let token = try makeToken(userId: userId)
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/quotations/1", method: .get, headers: bearer(token))
