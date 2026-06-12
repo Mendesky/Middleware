@@ -33,7 +33,11 @@ let package = Package(
         ),
         .testTarget(
             name: "MiddlewareTests",
-            dependencies: ["Middleware"]
+            dependencies: [
+                "Middleware",
+                .product(name: "HummingbirdTesting", package: "hummingbird"),
+                .product(name: "jose-swift", package: "jose-swift"),
+            ]
         ),
     ]
 )

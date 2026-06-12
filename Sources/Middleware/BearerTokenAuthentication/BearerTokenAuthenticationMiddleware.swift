@@ -30,20 +30,8 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     /// MENDESKY_AUTH_SENDER_JWK_PATH: (optional) The file path of JWK JSON context  for sender.
     /// MENDESKY_AUTH_PASSWORD: (optional) JWK password for AUTH if needed.
     public init(validators: [any WhitelistValidator] = []) throws {
-        let env = Environment()
-
-        let recipientKeyData = try env.get("MENDESKY_AUTH_RECIPIENT_JWK_PATH").map{ try Data(contentsOf: URL(filePath: $0)) } ?? env.get("MENDESKY_AUTH_RECIPIENT_JWK").flatMap{ Data(base64Encoded: .init($0.utf8)) }
-
-        guard let recipientKeyData else {
-            throw BearerTokenAuthenticationMiddlewareError.recipientKeyNotFoundInEnvironment
-        }
-
-        let senderKeyData = try env.get("MENDESKY_AUTH_SENDER_JWK_PATH").map{
-            try Data(contentsOf: URL(filePath: $0))
-        } ?? env.get("MENDESKY_AUTH_SENDER_JWK").flatMap{ Data(base64Encoded: .init($0.utf8)) }
-
-        let password = env.get("MENDESKY_AUTH_PASSWORD").flatMap{ Data(base64Encoded: .init($0.utf8)) }
-        self.verification = try AccessTokenVerification(senderKey: senderKeyData, recipientKey: recipientKeyData, password: password)
+        // Single source of truth for the MENDESKY_AUTH_* key loading.
+        self.verification = try AccessTokenVerification.fromEnvironment()
         self.validators = validators
     }
 
@@ -71,8 +59,7 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
             return Response.init(status: .unauthorized, body: responseBody)
         }
 
-        guard authorization.value.hasPrefix("Bearer "),
-            let token = authorization.value.split(separator: " ").last.map({ String($0) }) else {
+        guard let token = AccessTokenVerification.bearerToken(fromHeaderValue: authorization.value) else {
             return Response.init(status: .badRequest)
         }
 

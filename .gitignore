@@ -6,3 +6,9 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+
+# Local brain-link files (managed by /link-brain): kept on the maintainer's machine,
+# not committed to this shared library repo.
+/AGENTS.md
+/GEMINI.md
+/CLAUDE.local.md
