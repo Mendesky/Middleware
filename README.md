@@ -57,8 +57,10 @@ swift test
 | 環境變數 | 必填 | 說明 |
 |---|---|---|
 | `MENDESKY_AUTH_RECIPIENT_JWK` 或 `..._JWK_PATH` | ✅ | 解密私鑰（JWK JSON / base64 或檔案路徑）|
-| `MENDESKY_AUTH_SENDER_JWK` 或 `..._JWK_PATH` | — | 驗簽公鑰 |
+| `MENDESKY_AUTH_SENDER_JWK` 或 `..._JWK_PATH` | —（正式環境建議必填）| 寄件者驗證公鑰 |
 | `MENDESKY_AUTH_PASSWORD` | — | JWK 密碼（base64）|
+
+> ⚠️ **正式環境請務必設定 `MENDESKY_AUTH_SENDER_JWK`**：未設時 JWE 只有機密性、沒有寄件者認證——任何握有 recipient **公鑰**者都能偽造 token，而本中間件完全信任 token 內的 `userId`。
 
 ```swift
 router.add(middleware: try BearerTokenAuthenticationMiddleware(
@@ -115,7 +117,7 @@ public protocol PermissionsProvider: Sendable {
 ```
 
 - `ClosurePermissionsProvider { userId in ... }` — 用 closure 快速注入。
-- `CachingPermissionsProvider(wrapping:ttl:)` — actor、per-userId、單調時鐘 TTL（預設 60s）、**只快取成功**、`invalidate(userId:)` / `invalidateAll()`。
+- `CachingPermissionsProvider(wrapping:ttl:negativeTTL:maxEntries:)` — actor、per-userId、單調時鐘 TTL（預設 60s）、**只快取成功**、`invalidate(userId:)` / `invalidateAll()`。空結果（IAM 404→`[]`）改用較短的 `negativeTTL`（預設 10s；`nil` = 不快取空結果），避免剛開通的 user 在整個 `ttl` 內被擋；`maxEntries`（預設 10000）限制記憶體，額滿時先淘汰過期、再淘汰最舊。
 
 ### Status code
 
@@ -252,5 +254,6 @@ IAM_BASE_URL=http://localhost:24202 swift test --filter LiveIAMIntegrationTests
 
 - **`PermissionMiddleware` 不打 IAMContext**：它只呼叫注入的 `PermissionsProvider`（port）。真正的 HTTP client 由消費端提供——讓本套件保持零 IAM 依賴、可單獨編譯與測試（單元測試注入 fake provider，0 網路）。
 - **IAM client 該放哪**：建議放在 IAMContext 的 client 產物 / 共用 client 套件（implement `PermissionsProvider`），而非塞進本套件——「誰提供 API，誰擁有 client」。
-- **權限新鮮度**：IAMContext 投影為最終一致（grant/revoke 後 ~1–2s 才反映）；快取 TTL 與 `invalidate(userId:)` 是控制新鮮度的旋鈕。
+- **權限新鮮度**：IAMContext 投影為最終一致（grant/revoke 後 ~1–2s 才反映）；快取 `ttl` / `negativeTTL` 與 `invalidate(userId:)` 是控制新鮮度的旋鈕。
+- **寄件者認證**：JWE 的 `senderKey` 為選用，但未設時 token 只有機密性、無法驗證簽發者——正式環境務必設定 `MENDESKY_AUTH_SENDER_JWK`，否則握有 recipient 公鑰者可偽造 token（本中間件以 token 內 `userId` 為唯一授權輸入）。
 - **粗粒度**：本層是 endpoint 級檢查（「能不能呼叫這個 endpoint」）；resource 級規則（「能不能改這一筆」）仍須在 handler 內做。

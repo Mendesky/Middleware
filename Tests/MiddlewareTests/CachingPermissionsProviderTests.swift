@@ -65,4 +65,48 @@ private actor CountingProvider: PermissionsProvider {
 
         #expect(await upstream.callCount == 2)
     }
+
+    @Test func invalidateAllForcesRefetch() async throws {
+        let upstream = CountingProvider(returning: ["x"])
+        let cache = CachingPermissionsProvider(wrapping: upstream, ttl: .seconds(60))
+
+        _ = try await cache.permissions(forUserId: "u1")   // upstream call 1
+        _ = try await cache.permissions(forUserId: "u2")   // upstream call 2
+        await cache.invalidateAll()
+        _ = try await cache.permissions(forUserId: "u1")   // upstream call 3 (cache cleared)
+
+        #expect(await upstream.callCount == 3)
+    }
+
+    @Test func emptyResultIsNotCachedWhenNegativeTTLIsNil() async throws {
+        // A no-permission user (e.g. IAM 404 -> []) must not get stuck cached.
+        let upstream = CountingProvider(returning: [])
+        let cache = CachingPermissionsProvider(wrapping: upstream, ttl: .seconds(60), negativeTTL: nil)
+
+        _ = try await cache.permissions(forUserId: "u1")
+        _ = try await cache.permissions(forUserId: "u1")
+
+        #expect(await upstream.callCount == 2)  // empties not cached -> upstream hit every time
+    }
+
+    @Test func emptyResultIsCachedWithinNegativeTTL() async throws {
+        let upstream = CountingProvider(returning: [])
+        let cache = CachingPermissionsProvider(wrapping: upstream, ttl: .seconds(60), negativeTTL: .seconds(60))
+
+        _ = try await cache.permissions(forUserId: "u1")
+        _ = try await cache.permissions(forUserId: "u1")
+
+        #expect(await upstream.callCount == 1)  // cached for the negative window
+    }
+
+    @Test func evictsOldestWhenAtCapacity() async throws {
+        let upstream = CountingProvider(returning: ["x"])
+        let cache = CachingPermissionsProvider(wrapping: upstream, ttl: .seconds(60), maxEntries: 1)
+
+        _ = try await cache.permissions(forUserId: "u1")   // call 1, cache {u1}
+        _ = try await cache.permissions(forUserId: "u2")   // call 2, evicts u1 -> cache {u2}
+        _ = try await cache.permissions(forUserId: "u1")   // call 3, u1 was evicted -> refetch
+
+        #expect(await upstream.callCount == 3)
+    }
 }

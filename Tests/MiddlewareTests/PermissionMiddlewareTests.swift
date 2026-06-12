@@ -18,8 +18,8 @@ private func makeVerification() -> AccessTokenVerification {
     AccessTokenVerification(recipientKey: recipientKey)!
 }
 
-private func makeToken(userId: String) throws -> String {
-    let payload = AccessTokenPayload(authorizationId: "a", userId: userId, clientId: "c", scope: [], expiresAt: Date(timeIntervalSinceNow: 3600))
+private func makeToken(userId: String, expiresIn: TimeInterval = 3600) throws -> String {
+    let payload = AccessTokenPayload(authorizationId: "a", userId: userId, clientId: "c", scope: [], expiresAt: Date(timeIntervalSinceNow: expiresIn))
     let data = try JSONEncoder().encode(payload)
     let jwe = try JWE(payload: data, keyManagementAlg: .ecdhESA256KW, encryptionAlgorithm: .a256GCM, recipientKey: recipientKey)
     return jwe.compactSerialization
@@ -158,6 +158,29 @@ private func pathRule(_ pattern: String, methods: Set<HTTPRequest.Method>? = nil
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/quotations/123", method: .get, headers: bearer(token))
             #expect(res.status == .forbidden)
+        }
+    }
+
+    /// 過期 token → 401。
+    /// 受保護路由帶了一個 expiresAt 已過去的 token；自解密回 nil → 拿不到可信 userId → 401（不查 provider）。
+    @Test func unauthorizedWhenTokenExpired() async throws {
+        let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
+        let app = makeApp(rules: [rule], provider: providerReturning(["business:read"]))
+        let expired = try makeToken(userId: "u1", expiresIn: -10)  // already expired
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/123", method: .get, headers: bearer(expired))
+            #expect(res.status == .unauthorized)
+        }
+    }
+
+    /// 格式錯誤 / 無法解密的 token → 401。
+    /// 帶 `Authorization: Bearer <garbage>`；解密丟錯被 try? 吞成 nil → 401。
+    @Test func unauthorizedWhenTokenMalformed() async throws {
+        let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
+        let app = makeApp(rules: [rule], provider: providerReturning(["business:read"]))
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/123", method: .get, headers: bearer("not-a-valid-jwe"))
+            #expect(res.status == .unauthorized)
         }
     }
 }

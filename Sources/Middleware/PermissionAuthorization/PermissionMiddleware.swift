@@ -13,6 +13,10 @@
 //  An empty `rules` list makes this middleware a no-op. It self-decrypts (does not rely on
 //  BearerTokenAuthenticationMiddleware), so it is independent of middleware ordering.
 //
+//  Known limitation: `Context` is fixed to `BasicRequestContext` (matching
+//  BearerTokenAuthenticationMiddleware). Consumers using a custom `RequestContext` are not yet
+//  supported — unlike `DynamicCORSMiddleware<Context>`, this is not generic over the context.
+//
 
 import Foundation
 import Hummingbird
@@ -74,8 +78,7 @@ public struct PermissionMiddleware: MiddlewareProtocol {
 
     private func trustedUserId(from request: Request) -> String? {
         guard let authorization = request.headers.first(where: { $0.name == .authorization }),
-              authorization.value.hasPrefix("Bearer "),
-              let token = authorization.value.split(separator: " ").last.map(String.init),
+              let token = AccessTokenVerification.bearerToken(fromHeaderValue: authorization.value),
               let payload = try? verification.decrypt(compactString: token) else {
             return nil
         }

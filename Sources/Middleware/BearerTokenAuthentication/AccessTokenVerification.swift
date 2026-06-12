@@ -83,4 +83,12 @@ extension AccessTokenVerification {
 
         return try AccessTokenVerification(senderKey: senderKeyData, recipientKey: recipientKeyData, password: password)
     }
+
+    /// Extracts the compact token from an `Authorization: Bearer <token>` header value,
+    /// or `nil` if the value is not in `Bearer <token>` form. Shared by the auth and permission
+    /// middleware so the prefix parsing lives in one place.
+    public static func bearerToken(fromHeaderValue value: String) -> String? {
+        guard value.hasPrefix("Bearer ") else { return nil }
+        return value.split(separator: " ").last.map(String.init)
+    }
 }

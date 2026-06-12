@@ -57,8 +57,10 @@ Keys are loaded from environment variables:
 | Environment variable | Required | Description |
 |---|---|---|
 | `MENDESKY_AUTH_RECIPIENT_JWK` or `..._JWK_PATH` | ✅ | Decryption private key (JWK JSON / base64, or a file path) |
-| `MENDESKY_AUTH_SENDER_JWK` or `..._JWK_PATH` | — | Signature-verification public key |
+| `MENDESKY_AUTH_SENDER_JWK` or `..._JWK_PATH` | — (recommended in production) | Sender-authentication public key |
 | `MENDESKY_AUTH_PASSWORD` | — | JWK password (base64) |
+
+> ⚠️ **Set `MENDESKY_AUTH_SENDER_JWK` in production.** Without it the JWE has confidentiality only, not sender authentication — anyone holding the recipient **public** key can forge a token, and this middleware fully trusts the `userId` inside the token.
 
 ```swift
 router.add(middleware: try BearerTokenAuthenticationMiddleware(
@@ -115,7 +117,7 @@ public protocol PermissionsProvider: Sendable {
 ```
 
 - `ClosurePermissionsProvider { userId in ... }` — quick injection via a closure.
-- `CachingPermissionsProvider(wrapping:ttl:)` — actor, per-userId, monotonic-clock TTL (default 60s), **caches successes only**, `invalidate(userId:)` / `invalidateAll()`.
+- `CachingPermissionsProvider(wrapping:ttl:negativeTTL:maxEntries:)` — actor, per-userId, monotonic-clock TTL (default 60s), **caches successes only**, `invalidate(userId:)` / `invalidateAll()`. Empty results (IAM 404 → `[]`) use a shorter `negativeTTL` (default 10s; `nil` = don't cache empties) so a just-provisioned user isn't denied for the full `ttl`; `maxEntries` (default 10000) bounds memory, evicting expired-then-oldest when full.
 
 ### Status codes
 
@@ -252,5 +254,6 @@ IAM_BASE_URL=http://localhost:24202 swift test --filter LiveIAMIntegrationTests
 
 - **`PermissionMiddleware` does not call IAMContext**: it only calls the injected `PermissionsProvider` (a port). The real HTTP client is supplied by the consumer — keeping this package free of any IAM dependency and independently compilable/testable (unit tests inject a fake provider, zero network).
 - **Where the IAM client belongs**: prefer an IAMContext client product / shared client package (implementing `PermissionsProvider`) rather than baking it into this package — "whoever provides the API owns the client."
-- **Permission freshness**: IAMContext projections are eventually consistent (a grant/revoke takes ~1–2s to reflect); cache TTL and `invalidate(userId:)` are the knobs for controlling freshness.
+- **Permission freshness**: IAMContext projections are eventually consistent (a grant/revoke takes ~1–2s to reflect); the cache `ttl` / `negativeTTL` and `invalidate(userId:)` are the knobs for controlling freshness.
+- **Sender authentication**: the JWE `senderKey` is optional, but without it a token has confidentiality only and the issuer cannot be verified — set `MENDESKY_AUTH_SENDER_JWK` in production, otherwise anyone holding the recipient public key can forge a token (this middleware treats the token's `userId` as the sole authorization input).
 - **Coarse-grained**: this layer is an endpoint-level check ("may you call this endpoint"); resource-level rules ("may you edit *this* record") still belong inside the handler.
