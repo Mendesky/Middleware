@@ -117,7 +117,7 @@ public protocol PermissionsProvider: Sendable {
 ```
 
 - `ClosurePermissionsProvider { userId in ... }` — quick injection via a closure.
-- `CachingPermissionsProvider(wrapping:ttl:negativeTTL:maxEntries:)` — actor, per-userId, monotonic-clock TTL (default 60s), **caches successes only**, `invalidate(userId:)` / `invalidateAll()`. Empty results (IAM 404 → `[]`) use a shorter `negativeTTL` (default 10s; `nil` = don't cache empties) so a just-provisioned user isn't denied for the full `ttl`; `maxEntries` (default 10000) bounds memory, evicting expired-then-oldest when full.
+- `CachingPermissionsProvider(wrapping:ttl:negativeTTL:maxEntries:)` — actor, per-userId, monotonic-clock TTL (default 60s), **caches successes only**, `invalidate(userId:)` / `invalidateAll()`. Empty results (IAM 404 → `[]`) use a shorter `negativeTTL` (default 10s; `nil` = don't cache empties) so a just-provisioned user isn't denied for the full `ttl`; `maxEntries` (default 500) bounds memory, evicting expired-then-oldest when full.
 
 ### Status codes
 

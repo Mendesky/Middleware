@@ -117,7 +117,7 @@ public protocol PermissionsProvider: Sendable {
 ```
 
 - `ClosurePermissionsProvider { userId in ... }` — 用 closure 快速注入。
-- `CachingPermissionsProvider(wrapping:ttl:negativeTTL:maxEntries:)` — actor、per-userId、單調時鐘 TTL（預設 60s）、**只快取成功**、`invalidate(userId:)` / `invalidateAll()`。空結果（IAM 404→`[]`）改用較短的 `negativeTTL`（預設 10s；`nil` = 不快取空結果），避免剛開通的 user 在整個 `ttl` 內被擋；`maxEntries`（預設 10000）限制記憶體，額滿時先淘汰過期、再淘汰最舊。
+- `CachingPermissionsProvider(wrapping:ttl:negativeTTL:maxEntries:)` — actor、per-userId、單調時鐘 TTL（預設 60s）、**只快取成功**、`invalidate(userId:)` / `invalidateAll()`。空結果（IAM 404→`[]`）改用較短的 `negativeTTL`（預設 10s；`nil` = 不快取空結果），避免剛開通的 user 在整個 `ttl` 內被擋；`maxEntries`（預設 500）限制記憶體，額滿時先淘汰過期、再淘汰最舊。
 
 ### Status code
 

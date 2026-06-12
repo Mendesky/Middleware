@@ -40,7 +40,7 @@ public actor CachingPermissionsProvider: PermissionsProvider {
     public init(wrapping upstream: any PermissionsProvider,
                 ttl: Duration = .seconds(60),
                 negativeTTL: Duration? = .seconds(10),
-                maxEntries: Int = 10_000) {
+                maxEntries: Int = 500) {
         self.upstream = upstream
         self.ttl = ttl
         self.negativeTTL = negativeTTL
