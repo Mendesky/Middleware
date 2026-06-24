@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import HTTPTypes
 @testable import Middleware
 
 @Suite struct PermissionRuleTests {
@@ -44,5 +45,35 @@ import Foundation
     @Test func rejectsWrongSchemeOrExtraSegments() {
         #expect(AccessTokenVerification.bearerToken(fromHeaderValue: "Basic abc") == nil)
         #expect(AccessTokenVerification.bearerToken(fromHeaderValue: "Bearer a b") == nil)  // more than one token
+    }
+}
+
+@Suite struct OperatorIdHeaderTests {
+    private func headers(_ pairs: [(String, String)]) -> HTTPFields {
+        var fields = HTTPFields()
+        for (name, value) in pairs {
+            fields.append(HTTPField(name: HTTPField.Name(name)!, value: value))
+        }
+        return fields
+    }
+
+    @Test func prefersOperatorIdWhenPresent() {
+        let h = headers([("operatorId", "op-1"), ("userId", "user-1")])
+        #expect(AccessTokenVerification.operatorId(fromHeaders: h) == "op-1")
+    }
+
+    @Test func fallsBackToUserIdWhenOperatorIdMissing() {
+        let h = headers([("userId", "user-1")])
+        #expect(AccessTokenVerification.operatorId(fromHeaders: h) == "user-1")
+    }
+
+    @Test func operatorIdWinsEvenWhenUserIdDiffers() {
+        // operatorId is authoritative; a conflicting (deprecated) userId is ignored.
+        let h = headers([("operatorId", "op-1"), ("userId", "other")])
+        #expect(AccessTokenVerification.operatorId(fromHeaders: h) == "op-1")
+    }
+
+    @Test func returnsNilWhenNeitherPresent() {
+        #expect(AccessTokenVerification.operatorId(fromHeaders: headers([])) == nil)
     }
 }

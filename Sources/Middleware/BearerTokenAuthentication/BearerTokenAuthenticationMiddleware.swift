@@ -73,12 +73,14 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
                 return Response.init(status: .unauthorized, body: responseBody)
             }
 
-            // Verify userId header matches token payload to prevent token theft
-            guard let fieldKey = HTTPField.Name.init("userId"), let userId = input.headers.first(where: { $0.name == fieldKey}) else {
+            // Verify the caller-asserted operator identity matches the token payload to prevent
+            // token theft. `operatorId` is canonical; `userId` is the deprecated fallback. Both
+            // are compared against `payload.userId` (the token payload field is unchanged).
+            guard let assertedOperatorId = AccessTokenVerification.operatorId(fromHeaders: input.headers) else {
                 return Response.init(status: .badRequest)
             }
 
-            guard userId.value == payload.userId else {
+            guard assertedOperatorId == payload.userId else {
                 return Response(status: .badRequest)
             }
 
