@@ -6,6 +6,7 @@
 //
 import Foundation
 import Hummingbird
+import HTTPTypes
 import JSONWebEncryption
 import JSONWebKey
 import Logging
@@ -92,5 +93,21 @@ extension AccessTokenVerification {
         let parts = value.split(separator: " ", omittingEmptySubsequences: true)
         guard parts.count == 2, parts[0].lowercased() == "bearer" else { return nil }
         return String(parts[1])
+    }
+
+    /// Extracts the caller-asserted operator identity from request headers, used by the auth
+    /// middleware to confirm the bearer is the same subject the token was issued for.
+    ///
+    /// `operatorId` is the canonical header; `userId` is the deprecated predecessor and is only
+    /// consulted when `operatorId` is absent. When `operatorId` is present it wins outright —
+    /// a conflicting `userId` is ignored, not rejected. Returns `nil` when neither header is set.
+    public static func operatorId(fromHeaders headers: HTTPFields) -> String? {
+        if let key = HTTPField.Name("operatorId"), let value = headers.first(where: { $0.name == key })?.value {
+            return value
+        }
+        if let key = HTTPField.Name("userId"), let value = headers.first(where: { $0.name == key })?.value {
+            return value
+        }
+        return nil
     }
 }
