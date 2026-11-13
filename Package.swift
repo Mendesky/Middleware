@@ -27,6 +27,8 @@ let package = Package(
         // 若 jose-swift 沒有持續維護，改 fork 自行維護（直接宣告 jose-swift 的專案要一起換成 fork 的網址）。
         .package(url: "https://github.com/beatt83/jose-swift.git", "6.0.0"..<"6.0.5"),
         .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.0.0"),
+        // Only MiddlewareTesting uses this (for `_CryptoExtras` RSA keys). The range spans 3.x, for packages
+        // still on 3.x, and 4.x, because NotificationContext resolves swift-crypto 4.5.2.
         .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0"),
     ],
     targets: [
