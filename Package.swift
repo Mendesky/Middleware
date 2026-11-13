@@ -58,6 +58,7 @@ let package = Package(
                 "MiddlewareTesting",
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
                 .product(name: "jose-swift", package: "jose-swift"),
+                .product(name: "Crypto", package: "swift-crypto"),
             ]
         ),
     ]

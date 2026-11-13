@@ -3,7 +3,11 @@ import Foundation
 import Hummingbird
 import HummingbirdTesting
 import HTTPTypes
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import JSONWebKey
 import JSONWebEncryption
 import JSONWebAlgorithms
