@@ -5,6 +5,7 @@ public enum CallerIdentity: Sendable, Equatable {
 }
 
 public enum Caller {
+    /// Unset inside a streaming `ResponseBody` writer, which runs after the handler has returned.
     /// Set by `BearerTokenAuthenticationMiddleware` around the downstream handler; `nil` outside an authenticated request.
     @TaskLocal public static var current: CallerIdentity?
 }

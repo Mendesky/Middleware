@@ -1,6 +1,6 @@
 import Foundation
+import JSONWebAlgorithms
 import JSONWebKey
-import JSONWebSignature
 
 public struct ApplicationTokenClaims: Sendable, Equatable {
     /// The token's `sub`, lowercased.
@@ -37,14 +37,20 @@ public enum ApplicationTokenConfigurationError: Error, Equatable {
     case emptyKeySet
     case missingIssuer
     case missingAudience
+    /// Two keys in the set share a `kid`.
+    case duplicateKid
+    /// A key that is not an RSA key, or whose `alg` is present and not `RS256`.
+    case unsupportedKey
 }
 
 /// Verifies application tokens issued by OIDCContext: RS256 compact JWS with `typ: at+jwt`,
 /// checked against a locally configured JWK Set (no runtime `/jwks` fetch).
 public struct ApplicationTokenVerification: Sendable {
     private let keysByKid: [String: JWK]
-    private let issuer: String
-    private let audience: String
+    public let issuer: String
+    public let audience: String
+    /// The configured key ids, sorted.
+    public var kids: [String] { keysByKid.keys.sorted() }
     private let now: @Sendable () -> Date
 
     public init(
@@ -57,6 +63,10 @@ public struct ApplicationTokenVerification: Sendable {
         var byKid: [String: JWK] = [:]
         for key in publicKeys {
             guard let kid = key.keyID, !kid.isEmpty else { throw .keyWithoutKid }
+            guard key.keyType == .rsa, key.n != nil, key.e != nil,
+                  key.algorithm == nil || key.algorithm == "RS256"
+            else { throw .unsupportedKey }
+            guard byKid[kid] == nil else { throw .duplicateKid }
             byKid[kid] = key
         }
         self.keysByKid = byKid
@@ -86,8 +96,8 @@ public struct ApplicationTokenVerification: Sendable {
         }
         guard let set = try? JSONDecoder().decode(KeySet.self, from: data) else { throw .keySetUnreadable }
 
-        guard let issuer = nonBlank(env["MENDESKY_APP_TOKEN_ISSUER"]) else { throw .missingIssuer }
-        guard let audience = nonBlank(env["MENDESKY_APP_TOKEN_AUDIENCE"]) else { throw .missingAudience }
+        guard let issuer = trimmedNonBlank(env["MENDESKY_APP_TOKEN_ISSUER"]) else { throw .missingIssuer }
+        guard let audience = trimmedNonBlank(env["MENDESKY_APP_TOKEN_AUDIENCE"]) else { throw .missingAudience }
         return try ApplicationTokenVerification(publicKeys: set.keys, issuer: issuer, audience: audience)
     }
 
@@ -98,6 +108,10 @@ public struct ApplicationTokenVerification: Sendable {
               let header = (try? JSONSerialization.jsonObject(with: headerData)) as? [String: Any]
         else { throw .malformed }
 
+        // Parsers disagree on duplicate keys (first vs last wins), so a header naming `"alg"` twice is refused outright.
+        guard String(decoding: headerData, as: UTF8.self).components(separatedBy: "\"alg\"").count <= 2 else {
+            throw .malformed
+        }
         // Header checks come first, so e.g. an `alg: none` token never reaches signature verification.
         guard header["alg"] as? String == "RS256" else { throw .unsupportedAlgorithm }
         guard let typ = (header["typ"] as? String)?.lowercased(),
@@ -105,13 +119,19 @@ public struct ApplicationTokenVerification: Sendable {
         else { throw .wrongType }
         guard let kid = header["kid"] as? String, let key = keysByKid[kid] else { throw .unknownKey }
 
-        let jws: JWS
-        do { jws = try JWS(jwsString: compactString) } catch { throw .malformed }
+        // Verify the RS256 signature directly over the ASCII bytes of "<header>.<payload>", with the key chosen by
+        // the kid above. jose-swift's `JWS.verify` is not used: it re-parses the header and accepts `alg: none`.
+        guard let signature = Self.base64URLDecode(String(segments[2])),
+              let payloadData = Self.base64URLDecode(String(segments[1]))
+        else { throw .malformed }
+        let signingInput = Data("\(segments[0]).\(segments[1])".utf8)
+        // The algorithm is the constant RS256, never taken from the token.
+        guard let verifier = SigningAlgorithm.RS256.cryptoVerifier else { throw .unsupportedAlgorithm }
         let valid: Bool
-        do { valid = try jws.verify(key: key) } catch { throw .badSignature }
+        do { valid = try verifier.verify(data: signingInput, signature: signature, key: key) } catch { throw .badSignature }
         guard valid else { throw .badSignature }
 
-        guard let claims = (try? JSONSerialization.jsonObject(with: jws.payload)) as? [String: Any] else {
+        guard let claims = (try? JSONSerialization.jsonObject(with: payloadData)) as? [String: Any] else {
             throw .malformed
         }
         guard claims["iss"] as? String == issuer else { throw .wrongIssuer }
@@ -149,6 +169,11 @@ public struct ApplicationTokenVerification: Sendable {
     private static func nonBlank(_ value: String?) -> String? {
         guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return value
+    }
+
+    private static func trimmedNonBlank(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
     }
 
     private static func base64URLDecode(_ value: String) -> Data? {

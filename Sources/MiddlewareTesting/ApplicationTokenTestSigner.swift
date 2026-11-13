@@ -1,5 +1,6 @@
 import Foundation
 import _CryptoExtras
+import JSONWebAlgorithms
 import JSONWebKey
 import JSONWebSignature
 
@@ -78,5 +79,19 @@ public struct ApplicationTokenTestSigner: Sendable {
             key: privateJWK
         )
         return jws.compactSerialization
+    }
+
+    /// Signs `<base64url(headerJSON)>.<base64url(payloadJSON)>` with this signer's key (RS256) without any header
+    /// validation, so tests can craft hostile headers (duplicate `alg`, odd `typ`, ...).
+    public func rawToken(headerJSON: String, payloadJSON: String) -> String {
+        func b64(_ data: Data) -> String {
+            data.base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+        }
+        let input = "\(b64(Data(headerJSON.utf8))).\(b64(Data(payloadJSON.utf8)))"
+        // swiftlint:disable:next force_try
+        let signature = try! SigningAlgorithm.RS256.cryptoSigner!.sign(data: Data(input.utf8), key: privateJWK)
+        return "\(input).\(b64(signature))"
     }
 }
