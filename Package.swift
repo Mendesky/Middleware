@@ -27,7 +27,7 @@ let package = Package(
         // 若 jose-swift 沒有持續維護，改 fork 自行維護（直接宣告 jose-swift 的專案要一起換成 fork 的網址）。
         .package(url: "https://github.com/beatt83/jose-swift.git", "6.0.0"..<"6.0.5"),
         .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.0.0"),
-        .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"4.0.0"),
+        .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
