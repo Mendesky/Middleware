@@ -110,13 +110,12 @@ case nil: ...
 
 - `Caller.current` is a task-local `CallerIdentity?` (`.user(userId:clientId:)` / `.application(ApplicationTokenClaims)`).
 - `Scope.grants(held, required)`: passes when the token holds `*` (`Scope.all`) or exactly `required`; `Scope.notificationSend` = `notification:send`.
-- Verification checks `typ`, `iss`, `aud`, `exp` and requires `client_id` and `scope`; any failure is `401`, and the log carries only the error type — **tokens are never logged**.
+- Verification checks `alg` (RS256 only), `typ`, `kid`, the signature, `iss`, `aud`, `exp`, and requires `sub`, `client_id` and `scope`; any failure is `401` (the log names the reason; **tokens are never logged**).
 - Application tokens are signed with a **dedicated key** (not the ID Token key). Several public keys may be configured; to rotate: (1) add the new public key to the JWK Set and deploy the services; (2) switch OIDCContext to the new private key; (3) remove the old public key.
 - ⚠️ `jti` gives **no replay protection**; after a client is disabled, tokens already issued stay valid until `exp` (at most 15 minutes).
 - `PermissionMiddleware` **never grants** application callers (they have no IAM user), so a route that opts in to application tokens must not also be a `PermissionRule` route.
-- Behavior changes for existing services upgrading: user-token verification failures answer `401` (some used to be `503`); errors thrown by handlers are no longer converted to `503` and propagate unchanged; tokens are never logged.
-
-> Errors thrown by handlers are not converted into responses; they propagate as usual.
+- Behavior changes for existing services upgrading: token verification failures answer `401` (some used to be `503`); errors thrown by handlers: those conforming to Hummingbird's `HTTPResponseError` keep their status (404 stays 404), any other error is still a `503` (generic `service unavailable.` body, the log carries only the error type); tokens are never logged.
+- Configuration problems (unreadable JWK Set, missing or duplicate `kid`, a non-RSA key or one whose `alg` is not RS256, missing issuer/audience) throw at startup.
 
 ---
 
