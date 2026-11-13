@@ -4,7 +4,11 @@ import Hummingbird
 import HummingbirdTesting
 import HTTPTypes
 import Logging
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import JSONWebKey
 import JSONWebEncryption
 import MiddlewareTesting
@@ -52,6 +56,11 @@ private struct CapturingLogHandler: LogHandler {
     }
 }
 
+private struct BoomError: Error, CustomStringConvertible {
+    let secret: String
+    var description: String { "boom \(secret)" }
+}
+
 private func makeApp(
     signer: ApplicationTokenTestSigner,
     configured: Bool = true,
@@ -70,12 +79,61 @@ private func makeApp(
     router.get("open") { _, _ in describe(Caller.current) }
     router.get("open/missing") { _, _ -> String in throw HTTPError(.notFound) }
     router.get("closed") { _, _ in describe(Caller.current) }
+    router.get("open/boom") { _, _ -> String in throw BoomError(secret: "request-data-secret") }
+    router.get("closed/boom") { _, _ -> String in throw BoomError(secret: "request-data-secret") }
     router.get("closed/missing") { _, _ -> String in throw HTTPError(.notFound) }
     return Application(router: router)
 }
 
 @Suite struct BearerApplicationTokenTests {
     let signer = ApplicationTokenTestSigner()
+
+    @Test func plainHandlerErrorsAre503WithGenericBodyAndNoDescriptionLogged() async throws {
+        let store = CapturingLogHandler.Store()
+        let logger = Logger(label: "capture") { _ in CapturingLogHandler(store: store) }
+        let app = makeApp(signer: signer, logger: logger)
+        let user = try userToken(userId: "u1")
+        let appToken = signer.token(sub: "app-1")
+        try await app.test(.router) { client in
+            let u = try await client.execute(uri: "/closed/boom", method: .get, headers: headers(user, operatorId: "u1"))
+            #expect(u.status == .serviceUnavailable)
+            #expect(String(buffer: u.body) == "service unavailable.")
+            let a = try await client.execute(uri: "/open/boom", method: .get, headers: headers(appToken))
+            #expect(a.status == .serviceUnavailable)
+            #expect(String(buffer: a.body) == "service unavailable.")
+        }
+        #expect(store.all.contains("BoomError"))
+        #expect(!store.all.contains("request-data-secret"))
+        #expect(!store.all.contains(user))
+        #expect(!store.all.contains(appToken))
+    }
+
+    @Test func rejectedApplicationTokenLogsTheErrorCaseButNotTheToken() async throws {
+        let store = CapturingLogHandler.Store()
+        let logger = Logger(label: "capture") { _ in CapturingLogHandler(store: store) }
+        let app = makeApp(signer: signer, logger: logger)
+        let token = signer.token(sub: "app-1", issuer: "https://other")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/open", method: .get, headers: headers(token))
+            #expect(res.status == .unauthorized)
+            let closed = try await client.execute(uri: "/closed", method: .get, headers: headers(token))
+            #expect(closed.status == .unauthorized)
+        }
+        #expect(store.all.contains("wrongIssuer"))
+        #expect(store.all.contains("did not opt in"))
+        #expect(!store.all.contains(token))
+    }
+
+    @Test func unconfiguredApplicationTokenLogsWhy() async throws {
+        let store = CapturingLogHandler.Store()
+        let logger = Logger(label: "capture") { _ in CapturingLogHandler(store: store) }
+        let app = makeApp(signer: signer, configured: false, logger: logger)
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/open", method: .get, headers: headers(signer.token(sub: "app-1")))
+            #expect(res.status == .unauthorized)
+        }
+        #expect(store.all.contains("not configured"))
+    }
 
     @Test func applicationTokenOnOptedInRoutePasses() async throws {
         let app = makeApp(signer: signer)
@@ -147,7 +205,7 @@ private func makeApp(
         #expect(!store.all.contains("aaaa"))
     }
 
-    @Test func downstreamErrorsPropagateUnchanged() async throws {
+    @Test func downstreamHTTPResponseErrorsKeepTheirStatus() async throws {
         let app = makeApp(signer: signer)
         let user = try userToken(userId: "u1")
         try await app.test(.router) { client in

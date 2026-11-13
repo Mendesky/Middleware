@@ -58,6 +58,11 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         self.acceptsApplication = acceptsApplication
         self.validators = validators
         self.logger = Self.defaultLogger
+        if let applicationTokens {
+            logger.notice("Application tokens enabled: kids=\(applicationTokens.kids), issuer=\(applicationTokens.issuer), audience=\(applicationTokens.audience)")
+        } else {
+            logger.notice("Application tokens disabled: MENDESKY_APP_TOKEN_JWKS / MENDESKY_APP_TOKEN_JWKS_PATH not set")
+        }
     }
 
     public init(
@@ -98,13 +103,25 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         }
 
         let identity: CallerIdentity
+        let isApplicationToken = token.split(separator: ".", omittingEmptySubsequences: false).count == 3
         do {
-            if token.split(separator: ".", omittingEmptySubsequences: false).count == 3 {
+            if isApplicationToken {
                 // Application token: only on opted-in routes, only when keys are configured.
-                guard let applicationTokens, acceptsApplication(input) else {
+                guard let applicationTokens else {
+                    logger.notice("Application token rejected: application tokens are not configured")
                     return Self.unauthorized("application token rejected.")
                 }
-                identity = .application(try applicationTokens.verify(compactString: token))
+                guard acceptsApplication(input) else {
+                    logger.notice("Application token rejected: route did not opt in to application tokens")
+                    return Self.unauthorized("application token rejected.")
+                }
+                do {
+                    identity = .application(try applicationTokens.verify(compactString: token))
+                } catch {
+                    // `ApplicationTokenError` cases carry no token data (`missingClaim` only a claim name).
+                    logger.notice("Application token verification failed: \(error)")
+                    return Self.unauthorized("access token rejected.")
+                }
             } else {
                 guard let payload = try self.verification.decrypt(compactString: token) else {
                     return Self.unauthorized("access token decrypt failed.")
@@ -124,21 +141,34 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
             }
         } catch {
             // Never log the token (or anything derived from it); the error type is enough to diagnose.
-            logger.error("Bearer token verification failed: \(type(of: error))")
+            logger.notice("Bearer token verification failed: \(type(of: error))")
             return Self.unauthorized("access token rejected.")
         }
 
-        // Downstream runs outside the do/catch so handler errors propagate unchanged.
-        return try await Caller.$current.withValue(identity) {
-            try await next(input, context)
+        // Downstream runs outside the verification do/catch, so its errors never become 401.
+        do {
+            return try await Caller.$current.withValue(identity) {
+                try await next(input, context)
+            }
+        } catch let error as any HTTPResponseError {
+            throw error
+        } catch {
+            // Same as before application tokens existed: other handler errors are a 503, but the body and
+            // log carry only the error type (the description may include request data).
+            logger.error("Downstream handler failed: \(type(of: error))")
+            return Self.response(.serviceUnavailable, "service unavailable.")
         }
     }
 
     private static func unauthorized(_ message: String) -> Response {
+        response(.unauthorized, message)
+    }
+
+    private static func response(_ status: HTTPResponse.Status, _ message: String) -> Response {
         let body = ResponseBody(contentLength: message.utf8.count) { writer in
             try await writer.write(.init(string: message))
             try await writer.finish(nil)
         }
-        return Response(status: .unauthorized, body: body)
+        return Response(status: status, body: body)
     }
 }
