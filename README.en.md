@@ -6,7 +6,7 @@ Shared [Hummingbird 2.x](https://github.com/hummingbird-project/hummingbird) mid
 
 Provides:
 
-- **Authentication**: JWE bearer-token decryption (`BearerTokenAuthenticationMiddleware`)
+- **Authentication**: bearer-token verification, JWE (legacy) or at+jwt (`BearerTokenAuthenticationMiddleware`)
 - **Signed access tokens (`at+jwt`)**: RS256 JWTs for first-party users, external systems (application) and delegated users; routes opt in (`RouteAcceptance`, `Caller`, `Scope`); a test signer lives in `MiddlewareTesting`
 - **Authorization**: endpoint-level RBAC (`PermissionMiddleware`, live lookups against IAMContext)
 - **CORS**: origin allowlist + preflight (`DynamicCORSMiddleware`)
@@ -39,7 +39,7 @@ swift test
 
 | Name | Kind | Role |
 |---|---|---|
-| `BearerTokenAuthenticationMiddleware` | server (`MiddlewareProtocol`) | Decrypt JWE token, verify identity (who you are) |
+| `BearerTokenAuthenticationMiddleware` | server (`MiddlewareProtocol`) | Verify the Bearer token (JWE legacy or at+jwt), verify identity (who you are) |
 | `PermissionMiddleware` | server (`MiddlewareProtocol`) | Endpoint permission check (what you may do) |
 | `DynamicCORSMiddleware<Context>` | server (`RouterMiddleware`) | Origin-allowlist CORS + preflight |
 | `LoggingMiddleware` | server (`MiddlewareProtocol`) | Debug-level request/response logging |
@@ -51,7 +51,7 @@ swift test
 
 ## Authentication: `BearerTokenAuthenticationMiddleware`
 
-Decrypts the `Authorization: Bearer <JWE>` access token and checks the `userId` header to prevent token theft.
+Verifies `Authorization: Bearer <token>`: the token is a JWE (legacy, 5 segments) or an at+jwt (3 segments, below), and the `operatorId` header (`userId` is the deprecated fallback) is checked to prevent token theft.
 
 Keys are loaded from environment variables:
 
@@ -71,14 +71,16 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 
 Behavior & status codes:
 
+> ⚠️ **On routes opened for `.application`, the `operatorId` / `userId` headers are NOT verified and pass through to the handler unchanged.** Handlers must not trust them to identify an application caller; read `Caller.current` (`if case .application(let c) = Caller.current`).
+
 | Case | Response |
 |---|---|
 | OPTIONS / whitelisted path | pass through (skipped) |
 | No `Authorization` header | `401` |
 | Not `Bearer <token>` format | `400` |
-| Decrypt failed / token expired | `401` |
-| No `userId` header | `400` |
-| `userId` header ≠ userId inside token | `400` (anti-theft) |
+| JWE decrypt failed / token expired | `401` |
+| JWE: no `operatorId` (or deprecated `userId`) header | `400` |
+| JWE: `operatorId` / `userId` header ≠ userId inside token | `400` (anti-theft) |
 | Unexpected error during token verification | `401` |
 
 > Whitelisting uses `PathValidator` (below); matching paths skip authentication. `OPTIONS` is always skipped (for CORS preflight).
@@ -127,7 +129,7 @@ Claims: `iss`, `aud` (`mendesky-services`, string or array), `sub`, `sub_type`, 
   - a key that is not `kty=RSA`, lacks `n` or `e`, has an `alg` other than `RS256`, has a modulus under 2048 bits, or carries private fields (`d`, `p`, `q`, `dp`, `dq`, `qi`).
 - ⚠️ `MENDESKY_APP_TOKEN_*` was renamed to the two variables above; setting any old variable fails startup (the error names the variable to use instead).
 - `init(verification:validators:)` **never reads** `MENDESKY_ACCESS_TOKEN_TRUST`: with that init, at+jwt is not accepted even if the variable is set, and nothing is logged about it. To enable at+jwt use `init(validators:)`, `init(validators:accepting:)`, or the init that takes `trust:` explicitly.
-- `init(validators:)` logs notice lines at startup: `Signed access tokens enabled: ...` (audience, plus each issuer's callerTypes, actors and kids) or `Signed access tokens disabled: ...`, and `Legacy JWE mode: accept|warn|reject`.
+- Every init that reads the environment (`init(validators:)`, `init(validators:accepting:)`, `init(validators:acceptsApplication:)`) logs notice lines at startup: `Signed access tokens enabled: ...` (audience, plus each issuer's callerTypes, actors and kids) or `Signed access tokens disabled: ...`, and `Legacy JWE mode: accept|warn|reject`.
 
 #### Legacy JWE switch: `MENDESKY_LEGACY_JWE`
 
@@ -158,8 +160,10 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 ```
 
 - First-party users (JWE or at+jwt) need no opt-in; every route accepts them.
+- ⚠️ **On routes opened for `.application`, the `operatorId` / `userId` headers are NOT verified and pass through to the handler unchanged.** An application caller has no user, so handlers must not trust these headers; read `Caller.current` (`if case .application(let c) = Caller.current`) instead.
 - The old `BearerTokenAuthenticationMiddleware(acceptsApplication:)` still works and equals `accepting: [.application(where:)]`.
-- `actors: nil` on `.delegatedUser` accepts any actor the issuer is trusted for; `requiresScope` is matched exactly (**`*` does not apply**), and a delegated token whose scope contains `*` is always rejected.
+- `actors: nil` on `.delegatedUser` accepts any actor the issuer is trusted for; `requiresScope` is matched exactly (**`*` does not apply**), and a delegated token is always rejected if any scope item contains a `*` character (for example `*` or `quote:*`).
+- `PathValidator(try Regex(...))` matches the **raw request path**. Write `[^/]+` (one path segment) in examples rather than `.+`: `/quotes/.+` also matches `/quotes/1/admin`, opening the sub-paths too. For example `PathValidator(try Regex("/quotes/[^/]+"))`.
 
 Behavior and status codes (at+jwt rows; the rest as in the table above):
 
@@ -170,7 +174,7 @@ Behavior and status codes (at+jwt rows; the rest as in the table above):
 | Route not open to that caller (or actor not allowed by the route) | `401` |
 | `.delegatedUser`: route open and actor allowed, but scope lacks `requiresScope` | `403` (body `insufficient scope.`) |
 | `.user` and `.delegatedUser`: `operatorId` missing or ≠ `sub` | `400` (the `userId` header is a deprecated fallback) |
-| `.application` | no `operatorId` needed |
+| `.application` | no `operatorId` needed; if sent it is **not verified** and passes to the handler unchanged (see the warning above) |
 | 5-segment token with `MENDESKY_LEGACY_JWE=reject` | `401` |
 
 Verification accepts RS256 only (fixed, never taken from the token) and checks `typ`, `kid`, signature, `iss`, `aud` and `exp`; failure reasons are logged, **never the token**.
@@ -189,6 +193,9 @@ if case .application(let claims) = Caller.current {
 #### Key rotation and limits
 
 - An issuer may carry several public keys. To rotate: (1) add the new public key to the trust configuration and deploy the services; (2) switch the issuer to the new private key; (3) remove the old public key.
+- `aud` is shared platform-wide as `mendesky-services`, so any service that receives a token can use it to call other services. This is the same as JWE today and is why token forwarding works. A `.delegatedUser` token forwarded to a downstream route that isn't opened for delegatedUser gets `401`.
+- `reject` mode still requires the JWE keys (`MENDESKY_AUTH_*`) to be configured until the major version that removes JWE.
+- The base64 in `MENDESKY_ACCESS_TOKEN_TRUST` must be **single-line** (`base64 -w0` on GNU, `base64 -i file` on macOS); line-wrapped values fail startup.
 - ⚠️ `jti` gives **no replay protection**; after a client is disabled, tokens already issued stay valid until `exp` (up to 15 minutes).
 - `PermissionMiddleware` **must run after the Bearer middleware** to see at+jwt callers (it reads `Caller.current`). `.user` and `.delegatedUser` are looked up in IAM by `sub`; `.application` has no IAM user and is **never granted**, so a route open to applications must not also be a `PermissionRule` route.
 - Behavior changes for existing services upgrading: token verification failures answer `401` (some used to be `503`); errors thrown by handlers: those conforming to Hummingbird's `HTTPResponseError` keep their status (404 stays 404), any other error is still a `503` (generic `service unavailable.` body, the log carries only the error type); tokens are never logged. Application tokens now require `sub_type: "application"`, and the key rules are stricter (≥ 2048 bits, no private fields).
@@ -197,7 +204,7 @@ if case .application(let claims) = Caller.current {
 
 ## Authorization: `PermissionMiddleware` (endpoint-level RBAC)
 
-Goes after `BearerTokenAuthenticationMiddleware`. For routes covered by a rule: decrypt the token to get `userId` → fetch that user's permissions via a `PermissionsProvider` → **AND**-match (exact string match) against the rule's required permissions → allow or deny.
+Goes after `BearerTokenAuthenticationMiddleware`. For routes covered by a rule: read `Caller.current` to get `userId` (decrypting the JWE is only the deprecated fallback) → fetch that user's permissions via a `PermissionsProvider` → **AND**-match (exact string match) against the rule's required permissions → allow or deny.
 
 ### Three roles (responsibility boundaries)
 
@@ -266,10 +273,11 @@ let provider = CachingPermissionsProvider(wrapping: iamProvider, ttl: .seconds(6
 
 // (3) Route -> required-permissions rule table (this context's own policy).
 //     NOTE: PathValidator("string") is a *literal* match; for regex use PathValidator(try Regex(...)).
+//     NOTE: a regex matches the raw request path: use [^/]+ rather than .+ (else /…/audit-quotings/1/admin also matches).
 let rules: [PermissionRule] = [
-    .init(PathValidator(try Regex("/opportunity-context/audit-quotings/.+/total-assets")),
+    .init(PathValidator(try Regex("/opportunity-context/audit-quotings/[^/]+/total-assets")),
           methods: [.patch], requires: ["business:write"]),
-    .init(PathValidator(try Regex("/opportunity-context/audit-quotings/.+")),
+    .init(PathValidator(try Regex("/opportunity-context/audit-quotings/[^/]+")),
           methods: [.get],   requires: ["business:read"]),
 ]
 
@@ -291,16 +299,18 @@ try api.registerHandlers(on: router, serverURL: URL(string: "/opportunity-contex
 ### Request flow
 
 ```
-Frontend ──HTTP──▶ CORS ─▶ BearerTokenAuth (decrypt, verify userId) ─▶ PermissionMiddleware ─▶ handler
+Frontend ──HTTP──▶ CORS ─▶ BearerTokenAuth (verify JWE/at+jwt, verify operatorId, set Caller.current) ─▶ PermissionMiddleware ─▶ handler
                                                                         │ 1. match rules by method/path → required permissions
-                                                                        │ 2. decrypt token → userId
+                                                                        │ 2. read Caller.current → userId (decrypt the JWE only as the deprecated fallback)
                                                                         │ 3. provider fetches the user's permissions (cache hit ⇒ no IAM call)
                                                                         │ 4. AND-match → allow / 401 / 403 / 502
                                                                         ▼
                                                 provider miss ──HTTP──▶ IAMContext GET /employee-access/permissions/{userId}
 ```
 
-A protected request must carry: `Authorization: Bearer <JWE>` and `userId: <id>` (must equal the userId inside the token).
+A protected request must carry: `Authorization: Bearer <token>` (at+jwt or legacy JWE) and `operatorId: <id>` (must equal the user id inside the token; `userId` is the deprecated fallback). Application tokens need no `operatorId`.
+
+> ⚠️ **On routes opened for `.application`, the `operatorId` / `userId` headers are NOT verified and pass through to the handler unchanged.** Handlers must not trust them for application callers; read `Caller.current` (`if case .application(let c) = Caller.current`).
 
 ---
 
