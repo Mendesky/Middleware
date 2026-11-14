@@ -3,31 +3,14 @@ import Foundation
 import Hummingbird
 import HummingbirdTesting
 import HTTPTypes
-#if canImport(CryptoKit)
-import CryptoKit
-#else
-import Crypto
-#endif
-import JSONWebKey
-import JSONWebEncryption
-import JSONWebAlgorithms
+import Logging
 import MiddlewareTesting
 @testable import Middleware
 
-// MARK: - Test token plumbing (mirrors IdentityContext's JWETokenGenerator defaults)
-
-/// One EC P-256 key reused to both encrypt (public part) and decrypt (private part) test tokens.
-private let recipientKey: JWK = P256.KeyAgreement.PrivateKey().jwkRepresentation
+// MARK: - Test token plumbing (JWE and signed token helpers live in Support/TokenFixtures.swift)
 
 private func makeVerification() -> AccessTokenVerification {
-    AccessTokenVerification(recipientKey: recipientKey)!
-}
-
-private func makeToken(userId: String, expiresIn: TimeInterval = 3600) throws -> String {
-    let payload = AccessTokenPayload(authorizationId: "a", userId: userId, clientId: "c", scope: [], expiresAt: Date(timeIntervalSinceNow: expiresIn))
-    let data = try JSONEncoder().encode(payload)
-    let jwe = try JWE(payload: data, keyManagementAlg: .ecdhESA256KW, encryptionAlgorithm: .a256GCM, recipientKey: recipientKey)
-    return jwe.compactSerialization
+    AccessTokenVerification(recipientKey: testRecipientKey)!
 }
 
 private func bearer(_ token: String) -> HTTPFields {
@@ -75,7 +58,7 @@ private actor CallCounter {
     @Test func allowsWhenProviderReturnsRequiredPermission() async throws {
         let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
         let app = makeApp(rules: [rule], provider: providerReturning(["business:read", "other:thing"]))
-        let token = try makeToken(userId: "u1")
+        let token = try jweUserToken(userId: "u1")
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/quotations/123", method: .get, headers: bearer(token))
             #expect(res.status == .ok)
@@ -88,7 +71,7 @@ private actor CallCounter {
     @Test func forbidsWhenProviderLacksRequiredPermission() async throws {
         let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
         let app = makeApp(rules: [rule], provider: providerReturning(["something:else"]))
-        let token = try makeToken(userId: "u1")
+        let token = try jweUserToken(userId: "u1")
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/quotations/123", method: .get, headers: bearer(token))
             #expect(res.status == .forbidden)
@@ -113,7 +96,7 @@ private actor CallCounter {
     @Test func badGatewayWhenProviderFails() async throws {
         let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
         let app = makeApp(rules: [rule], provider: FailingProvider())
-        let token = try makeToken(userId: "u1")
+        let token = try jweUserToken(userId: "u1")
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/quotations/123", method: .get, headers: bearer(token))
             #expect(res.status == .badGateway)
@@ -164,7 +147,7 @@ private actor CallCounter {
     @Test func multipleRequiredPermissionsNeedAll() async throws {
         let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read", "business:write"])
         let app = makeApp(rules: [rule], provider: providerReturning(["business:read"]))  // 缺 business:write
-        let token = try makeToken(userId: "u1")
+        let token = try jweUserToken(userId: "u1")
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/quotations/123", method: .get, headers: bearer(token))
             #expect(res.status == .forbidden)
@@ -176,7 +159,7 @@ private actor CallCounter {
     @Test func unauthorizedWhenTokenExpired() async throws {
         let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
         let app = makeApp(rules: [rule], provider: providerReturning(["business:read"]))
-        let expired = try makeToken(userId: "u1", expiresIn: -10)  // already expired
+        let expired = try jweUserToken(userId: "u1", expiresIn: -10)  // already expired
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/quotations/123", method: .get, headers: bearer(expired))
             #expect(res.status == .unauthorized)
@@ -210,5 +193,217 @@ private actor CallCounter {
             #expect(res.status == .unauthorized)
         }
         #expect(await called.count == 0)
+    }
+}
+
+// MARK: - Behind BearerTokenAuthenticationMiddleware (reads Caller.current)
+
+private actor UserIdRecorder {
+    private(set) var userIds: [String] = []
+    func record(_ userId: String) { userIds.append(userId) }
+}
+
+private func recordingProvider(_ recorder: UserIdRecorder, returning permissions: [String]) -> any PermissionsProvider {
+    ClosurePermissionsProvider { userId in
+        await recorder.record(userId)
+        return permissions
+    }
+}
+
+/// Bearer (ic user + oc application/delegatedUser) in front of PermissionMiddleware.
+private func makeChainApp(
+    rules: [PermissionRule], provider: any PermissionsProvider, accepting: [RouteAcceptance] = []
+) throws -> some ApplicationProtocol {
+    let router = Router()
+    router.add(middleware: BearerTokenAuthenticationMiddleware(
+        verification: makeVerification(),
+        trust: try icOcTrust(),
+        accepting: accepting,
+        serviceName: "TestService",
+        logger: Logger(label: "test") { _ in SwiftLogNoOpLogHandler() }
+    ))
+    router.add(middleware: PermissionMiddleware(rules: rules, provider: provider, verification: makeVerification()))
+    router.get("quotations/:id") { _, _ in "ok" }
+    return Application(router: router)
+}
+
+@Suite struct PermissionMiddlewareChainTests {
+    private func rule() throws -> PermissionRule {
+        try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
+    }
+
+    @Test func firstPartySignedTokenPassesPermissionMiddleware() async throws {
+        let recorder = UserIdRecorder()
+        let app = try makeChainApp(rules: [try rule()], provider: recordingProvider(recorder, returning: ["business:read"]))
+        let token = ic.token(sub: "acc_1", clientId: "mendesky-first-party", subType: "user")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token, operatorId: "acc_1"))
+            #expect(res.status == .ok)
+        }
+        #expect(await recorder.userIds == ["acc_1"])
+    }
+
+    @Test func firstPartySignedTokenWithoutOperatorIdIs400AndSkipsProvider() async throws {
+        let recorder = UserIdRecorder()
+        let app = try makeChainApp(rules: [try rule()], provider: recordingProvider(recorder, returning: ["business:read"]))
+        let token = ic.token(sub: "acc_1", clientId: "mendesky-first-party", subType: "user")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token))
+            #expect(res.status == .badRequest)
+        }
+        #expect(await recorder.userIds.isEmpty)
+    }
+
+    @Test func firstPartySignedTokenLackingPermissionIs403() async throws {
+        let app = try makeChainApp(rules: [try rule()], provider: providerReturning([]))
+        let token = ic.token(sub: "acc_1", clientId: "mendesky-first-party", subType: "user")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token, operatorId: "acc_1"))
+            #expect(res.status == .forbidden)
+        }
+    }
+
+    @Test func delegatedUserIsCheckedAgainstIAMByUserId() async throws {
+        let accepting: [RouteAcceptance] = [
+            .delegatedUser(PathValidator(try Regex("/quotations/.+")), methods: [.get], requiresScope: "quote:read")
+        ]
+        let token = oc.token(
+            sub: "acc_1", clientId: "mendesky-mcp-server", scope: "quote:read", subType: "user",
+            actors: ["mendesky-mcp-server"])
+
+        let recorder = UserIdRecorder()
+        let granted = try makeChainApp(
+            rules: [try rule()], provider: recordingProvider(recorder, returning: ["business:read"]), accepting: accepting)
+        try await granted.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token, operatorId: "acc_1"))
+            #expect(res.status == .ok)
+        }
+        #expect(await recorder.userIds == ["acc_1"])
+
+        let denied = try makeChainApp(rules: [try rule()], provider: providerReturning([]), accepting: accepting)
+        try await denied.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token, operatorId: "acc_1"))
+            #expect(res.status == .forbidden)
+        }
+    }
+
+    @Test func applicationCallerOnRuledRouteIsRefusedWithoutCallingProvider() async throws {
+        let recorder = UserIdRecorder()
+        let app = try makeChainApp(
+            rules: [try rule()], provider: recordingProvider(recorder, returning: ["business:read"]),
+            accepting: [.application(PathValidator(try Regex("/quotations/.+")))])
+        let token = oc.token(sub: "app-1", scope: "notification:send")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token))
+            #expect(res.status == .unauthorized)
+        }
+        #expect(await recorder.userIds.isEmpty)
+    }
+
+    /// Wrong order (Permission before Bearer) must fail closed: no `Caller.current` yet, and a 3-segment token is not a JWE.
+    @Test func permissionBeforeBearerFailsClosed() async throws {
+        let recorder = UserIdRecorder()
+        let router = Router()
+        router.add(middleware: PermissionMiddleware(
+            rules: [try rule()], provider: recordingProvider(recorder, returning: ["business:read"]),
+            verification: makeVerification()))
+        router.add(middleware: BearerTokenAuthenticationMiddleware(
+            verification: makeVerification(), trust: try icOcTrust(), accepting: [],
+            serviceName: "TestService", logger: Logger(label: "test") { _ in SwiftLogNoOpLogHandler() }))
+        router.get("quotations/:id") { _, _ in "ok" }
+        let token = ic.token(sub: "acc_1", clientId: "mendesky-first-party", subType: "user")
+        try await Application(router: router).test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token, operatorId: "acc_1"))
+            #expect(res.status == .unauthorized)
+        }
+        #expect(await recorder.userIds.isEmpty)
+    }
+
+    @Test func jweThroughBearerStillPasses() async throws {
+        let recorder = UserIdRecorder()
+        let app = try makeChainApp(rules: [try rule()], provider: recordingProvider(recorder, returning: ["business:read"]))
+        let token = try jweUserToken(userId: "u1")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token, operatorId: "u1"))
+            #expect(res.status == .ok)
+        }
+        #expect(await recorder.userIds == ["u1"])
+    }
+}
+
+// MARK: - Legacy JWE fallback honours MENDESKY_LEGACY_JWE
+
+private func makeLegacyApp(mode: LegacyJWEMode, logger: Logger, recorder: UserIdRecorder) throws -> some ApplicationProtocol {
+    let router = Router()
+    router.add(middleware: PermissionMiddleware(
+        rules: [try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])],
+        provider: recordingProvider(recorder, returning: ["business:read"]),
+        verification: makeVerification(),
+        legacyJWE: mode,
+        serviceName: "TestService",
+        logger: logger
+    ))
+    router.get("quotations/:id") { _, _ in "ok" }
+    return Application(router: router)
+}
+
+private func logLines(_ store: CapturingLogHandler.Store, containing text: String) -> [String] {
+    store.all.split(separator: "\n").map(String.init).filter { $0.contains(text) }
+}
+
+@Suite struct PermissionMiddlewareLegacyJWETests {
+    @Test func rejectModeRefusesJWEWithoutDecryptingOrCallingProvider() async throws {
+        let (logger, store) = CapturingLogHandler.logger()
+        let recorder = UserIdRecorder()
+        let app = try makeLegacyApp(mode: .reject, logger: logger, recorder: recorder)
+        let token = try jweUserToken(userId: "u1")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: bearer(token))
+            #expect(res.status == .unauthorized)
+        }
+        #expect(await recorder.userIds.isEmpty)
+        let rejected = logLines(store, containing: "legacy-jwe-rejected")
+        #expect(rejected.count == 1)
+        let line = try #require(rejected.first)
+        #expect(line.hasPrefix("notice") && line.contains("{id}") && line.contains("TestService"))
+        #expect(!store.all.contains(token) && !store.all.contains("u1"))
+        #expect(logLines(store, containing: "legacy-jwe-accepted").isEmpty)
+    }
+
+    @Test func acceptModeLogsAcceptedWithoutTokenOrUserId() async throws {
+        let (logger, store) = CapturingLogHandler.logger()
+        let recorder = UserIdRecorder()
+        let app = try makeLegacyApp(mode: .accept, logger: logger, recorder: recorder)
+        let token = try jweUserToken(userId: "u1")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: bearer(token))
+            #expect(res.status == .ok)
+        }
+        #expect(await recorder.userIds == ["u1"])
+        let accepted = logLines(store, containing: "legacy-jwe-accepted")
+        #expect(accepted.count == 1)
+        let line = try #require(accepted.first)
+        #expect(line.hasPrefix("notice") && line.contains("{id}") && line.contains("TestService"))
+        let keys = line.matches(of: /"(\w+)":/).map { String($0.output.1) }
+        #expect(Set(keys) == ["clientId", "route", "service"] && keys.count == 3)
+        #expect(!store.all.contains(token) && !store.all.contains("u1") && !store.all.contains("/quotations/1"))
+    }
+
+    @Test func warnModeLogsAtWarning() async throws {
+        let (logger, store) = CapturingLogHandler.logger()
+        let app = try makeLegacyApp(mode: .warn, logger: logger, recorder: UserIdRecorder())
+        let token = try jweUserToken(userId: "u1")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: bearer(token))
+            #expect(res.status == .ok)
+        }
+        let line = try #require(logLines(store, containing: "legacy-jwe-accepted").first)
+        #expect(line.hasPrefix("warning"))
+    }
+
+    @Test func invalidModeInEnvironmentRefusesToStart() {
+        #expect(throws: LegacyJWEModeError(value: "off")) {
+            try PermissionMiddleware(rules: [], provider: providerReturning([]), environment: ["MENDESKY_LEGACY_JWE": "off"])
+        }
     }
 }
