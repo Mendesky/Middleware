@@ -38,8 +38,6 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     let validators: [any WhitelistValidator]
     let serviceName: String
 
-    private static let defaultLogger = Logger(label: "IdentityContext.BearerTokenAuthenticationMiddleware")
-
     /// from environment
     /// MENDESKY_AUTH_RECIPIENT_JWK: The base64 json encoded string from JWK for recipient.
     /// MENDESKY_AUTH_RECIPIENT_JWK_PATH: The file path of JWK JSON context  for recipient.

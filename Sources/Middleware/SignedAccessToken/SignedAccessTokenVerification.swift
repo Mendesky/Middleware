@@ -121,7 +121,7 @@ public struct SignedAccessTokenVerification: Sendable {
             ))
         case .delegatedUser:
             guard let actor, trusted.actors.contains(actor) else { throw .actorNotAllowed }
-            guard !scope.contains(Scope.all) else { throw .wildcardScopeInDelegatedToken }
+            guard !scope.contains(where: { $0.contains("*") }) else { throw .wildcardScopeInDelegatedToken }
             return .delegatedUser(DelegatedUserClaims(
                 userId: sub, clientId: clientId, actor: actor, originClient: originClient, scope: scope,
                 issuer: issuerName, expiresAt: expiresAt

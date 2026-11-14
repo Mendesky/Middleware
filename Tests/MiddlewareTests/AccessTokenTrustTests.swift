@@ -220,4 +220,54 @@ private func trustJSON(keys: [[String: Any]], callerTypes: [String] = ["applicat
             _ = try trust([TrustedIssuer(issuer: "https://oidc.test", callerTypes: [.application], publicKeys: [])])
         }
     }
+
+    // MARK: Parser disagreement
+
+    /// JSONDecoder accepts these (the extra member is ignored) but JSONSerialization rejects the whole document.
+    @Test func parserDisagreementIsUnreadableNotACrash() throws {
+        let valid = String(decoding: trustJSON(keys: [jwkObject(oc.publicKey)]), as: UTF8.self)
+        for extra in [#""x":1e400"#, #""x":"\ud800""#] {
+            let text = String(valid.dropLast()) + "," + extra + "}"
+            let data = Data(text.utf8)
+            // Proves the typed decode alone succeeds, so the rejection below is not vacuous.
+            #expect((try? JSONSerialization.jsonObject(with: data)) == nil)
+            expectError(.unreadable) { _ = try AccessTokenTrust(json: data) }
+        }
+    }
+
+    // MARK: Public exponent
+
+    @Test func weakOrMalformedExponentRefuses() throws {
+        for e in ["AQ", "", "AAAA", "Ag"] {
+            var key = jwkObject(oc.publicKey)
+            key["e"] = e
+            expectError(.unsupportedKey(kid: "oc-1")) { _ = try AccessTokenTrust(json: trustJSON(keys: [key])) }
+        }
+        // 2 (even) and 1 (too small) through the Swift initializer too.
+        for e in [Data([2]), Data([1]), Data()] {
+            var key = oc.publicKey
+            key.e = e
+            expectError(.unsupportedKey(kid: "oc-1")) {
+                _ = try trust([TrustedIssuer(issuer: "https://oidc.test", callerTypes: [.application], publicKeys: [key])])
+            }
+        }
+    }
+
+    @Test func standardExponentIsAccepted() throws {
+        var key = jwkObject(oc.publicKey)
+        key["e"] = "AQAB"
+        _ = try AccessTokenTrust(json: trustJSON(keys: [key]))
+    }
+
+    // MARK: kid characters
+
+    @Test func unprintableOrEscapedKidRefuses() {
+        for kid in [" ", "a b", "a\"b", "a\\b", "k\u{e9}", "k\u{7f}", "k\n"] {
+            var key = oc.publicKey
+            key.keyID = kid
+            expectError(.keyWithoutKid(issuer: "https://oidc.test")) {
+                _ = try trust([TrustedIssuer(issuer: "https://oidc.test", callerTypes: [.application], publicKeys: [key])])
+            }
+        }
+    }
 }

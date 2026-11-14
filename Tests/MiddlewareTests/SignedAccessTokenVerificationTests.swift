@@ -97,6 +97,16 @@ private func claimsJSON(exp: Int = 99999999999, extra: String = "") -> String {
         expectError(
             .wildcardScopeInDelegatedToken, v,
             oc.token(sub: "acc_1", scope: "quote:read *", subType: "user", actors: ["mendesky-mcp-server"]))
+        expectError(
+            .wildcardScopeInDelegatedToken, v,
+            oc.token(sub: "acc_1", scope: "quote:*", subType: "user", actors: ["mendesky-mcp-server"]))
+    }
+
+    @Test func nullActIsMissingActSub() throws {
+        let v = try verification()
+        let header = #"{"alg":"RS256","typ":"at+jwt","kid":"oc-1"}"#
+        let payload = #"{"iss":"https://oidc.test","aud":["\#(audience)"],"sub":"acc_1","sub_type":"user","client_id":"c","scope":"quote:read","exp":99999999999,"act":null}"#
+        expectError(.missingClaim("act.sub"), v, oc.rawToken(headerJSON: header, payloadJSON: payload))
     }
 
     @Test func actorNotInIssuerListIsRejected() throws {

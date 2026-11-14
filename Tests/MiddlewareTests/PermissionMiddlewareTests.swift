@@ -300,6 +300,25 @@ private func makeChainApp(
         #expect(await recorder.userIds.isEmpty)
     }
 
+    /// Wrong order (Permission before Bearer) must fail closed: no `Caller.current` yet, and a 3-segment token is not a JWE.
+    @Test func permissionBeforeBearerFailsClosed() async throws {
+        let recorder = UserIdRecorder()
+        let router = Router()
+        router.add(middleware: PermissionMiddleware(
+            rules: [try rule()], provider: recordingProvider(recorder, returning: ["business:read"]),
+            verification: makeVerification()))
+        router.add(middleware: BearerTokenAuthenticationMiddleware(
+            verification: makeVerification(), trust: try icOcTrust(), accepting: [],
+            serviceName: "TestService", logger: Logger(label: "test") { _ in SwiftLogNoOpLogHandler() }))
+        router.get("quotations/:id") { _, _ in "ok" }
+        let token = ic.token(sub: "acc_1", clientId: "mendesky-first-party", subType: "user")
+        try await Application(router: router).test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token, operatorId: "acc_1"))
+            #expect(res.status == .unauthorized)
+        }
+        #expect(await recorder.userIds.isEmpty)
+    }
+
     @Test func jweThroughBearerStillPasses() async throws {
         let recorder = UserIdRecorder()
         let app = try makeChainApp(rules: [try rule()], provider: recordingProvider(recorder, returning: ["business:read"]))

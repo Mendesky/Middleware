@@ -97,7 +97,12 @@ public struct AccessTokenTrust: Sendable {
                 issuer: entry.issuer, callerTypes: callerTypes, actors: entry.actors ?? [], publicKeys: entry.keys.keys
             ))
         }
-        try self.init(audience: document.audience, issuers: issuers, rawPrivateMembers: Self.rawPrivateMembers(in: json))
+        // The raw parse must succeed and mirror the typed one; if the two parsers disagree, refuse rather than guess.
+        guard let raw = Self.rawPrivateMembers(in: json),
+              raw.count == issuers.count,
+              zip(raw, issuers).allSatisfy({ $0.count == $1.publicKeys.count })
+        else { throw .unreadable }
+        try self.init(audience: document.audience, issuers: issuers, rawPrivateMembers: raw)
     }
 
     /// Reads `MENDESKY_ACCESS_TOKEN_TRUST_PATH` (a file; wins) or `MENDESKY_ACCESS_TOKEN_TRUST` (base64 JSON).
@@ -160,13 +165,25 @@ public struct AccessTokenTrust: Sendable {
             guard !trusted.publicKeys.isEmpty else { throw .emptyKeySet(issuer: name) }
 
             for (keyIndex, key) in trusted.publicKeys.enumerated() {
-                guard let kid = key.keyID, !kid.isEmpty else { throw .keyWithoutKid(issuer: name) }
-                let rawPrivate = rawPrivateMembers?[issuerIndex][keyIndex] ?? false
+                // Printable ASCII without `"` or `\`: anything else is escaped in the token header, so the
+                // verifier would reject every token and startup would give no hint.
+                guard let kid = key.keyID, !kid.isEmpty,
+                      kid.utf8.allSatisfy({ (0x21...0x7E).contains($0) && $0 != 0x22 && $0 != 0x5C })
+                else { throw .keyWithoutKid(issuer: name) }
+                let rawPrivate: Bool
+                if let rawPrivateMembers {
+                    guard rawPrivateMembers.indices.contains(issuerIndex),
+                          rawPrivateMembers[issuerIndex].indices.contains(keyIndex)
+                    else { throw .unreadable }
+                    rawPrivate = rawPrivateMembers[issuerIndex][keyIndex]
+                } else {
+                    rawPrivate = false
+                }
                 if rawPrivate || key.d != nil || key.p != nil || key.q != nil
                     || key.dp != nil || key.dq != nil || key.qi != nil {
                     throw .privateKeyMaterial(kid: kid)
                 }
-                guard key.keyType == .rsa, let modulus = key.n, key.e != nil,
+                guard key.keyType == .rsa, let modulus = key.n, let exponent = key.e, Self.isUsableExponent(exponent),
                       key.algorithm == nil || key.algorithm == "RS256"
                 else { throw .unsupportedKey(kid: kid) }
                 // Leading zero bytes do not add bits.
@@ -204,18 +221,28 @@ public struct AccessTokenTrust: Sendable {
         let issuers: [Entry]
     }
 
+    /// An RSA public exponent must be an odd integer of at least 3; `e = 1` would let anyone forge signatures.
+    private static func isUsableExponent(_ exponent: Data) -> Bool {
+        let significant = exponent.drop(while: { $0 == 0 })
+        guard let last = significant.last, last & 1 == 1 else { return false }
+        return significant.count > 1 || last >= 3
+    }
+
     private static let privateMemberNames: Set<String> = ["d", "p", "q", "dp", "dq", "qi"]
 
     /// jose-swift's JWK decoding drops `dp`/`dq`/`qi`, so the decoded JWKs cannot reveal them. Looks at the raw
-    /// member names of every key instead. Shape problems are left to the typed decode above.
-    private static func rawPrivateMembers(in json: Data) -> [[Bool]] {
+    /// member names of every key instead. 
+    /// Returns `nil` when the raw parse fails or has an unexpected shape.
+    private static func rawPrivateMembers(in json: Data) -> [[Bool]]? {
         guard let root = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any],
               let issuers = root["issuers"] as? [[String: Any]]
-        else { return [] }
-        return issuers.map { issuer in
-            let keys = ((issuer["keys"] as? [String: Any])?["keys"] as? [[String: Any]]) ?? []
-            return keys.map { !privateMemberNames.isDisjoint(with: $0.keys) }
+        else { return nil }
+        var result: [[Bool]] = []
+        for issuer in issuers {
+            guard let keys = (issuer["keys"] as? [String: Any])?["keys"] as? [[String: Any]] else { return nil }
+            result.append(keys.map { !privateMemberNames.isDisjoint(with: $0.keys) })
         }
+        return result
     }
 }
 
