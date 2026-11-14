@@ -14,6 +14,10 @@ let package = Package(
             name: "Middleware",
             targets: ["Middleware"]
         ),
+        .library(
+            name: "MiddlewareTesting",
+            targets: ["MiddlewareTesting"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/hummingbird-project/hummingbird", from: "2.0.0"),
@@ -23,6 +27,9 @@ let package = Package(
         // 若 jose-swift 沒有持續維護，改 fork 自行維護（直接宣告 jose-swift 的專案要一起換成 fork 的網址）。
         .package(url: "https://github.com/beatt83/jose-swift.git", "6.0.0"..<"6.0.5"),
         .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.0.0"),
+        // Only MiddlewareTesting uses this (for `_CryptoExtras` RSA keys). The range spans 3.x, for packages
+        // still on 3.x, and 4.x, because NotificationContext resolves swift-crypto 4.5.2.
+        .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -35,12 +42,23 @@ let package = Package(
                 .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
             ]
         ),
+        // Test signer for application tokens; lets services (and this package) mint tokens without OIDCContext.
+        .target(
+            name: "MiddlewareTesting",
+            dependencies: [
+                "Middleware",
+                .product(name: "jose-swift", package: "jose-swift"),
+                .product(name: "_CryptoExtras", package: "swift-crypto"),
+            ]
+        ),
         .testTarget(
             name: "MiddlewareTests",
             dependencies: [
                 "Middleware",
+                "MiddlewareTesting",
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
                 .product(name: "jose-swift", package: "jose-swift"),
+                .product(name: "Crypto", package: "swift-crypto"),
             ]
         ),
     ]

@@ -7,6 +7,7 @@ Shared [Hummingbird 2.x](https://github.com/hummingbird-project/hummingbird) mid
 Provides:
 
 - **Authentication**: JWE bearer-token decryption (`BearerTokenAuthenticationMiddleware`)
+- **Application tokens**: OIDCContext RS256 JWTs for external systems, opted in per route (`Caller`, `Scope`); a test signer lives in `MiddlewareTesting`
 - **Authorization**: endpoint-level RBAC (`PermissionMiddleware`, live lookups against IAMContext)
 - **CORS**: origin allowlist + preflight (`DynamicCORSMiddleware`)
 - **Logging**: debug-level request/response logging (`LoggingMiddleware`)
@@ -78,9 +79,43 @@ Behavior & status codes:
 | Decrypt failed / token expired | `401` |
 | No `userId` header | `400` |
 | `userId` header ≠ userId inside token | `400` (anti-theft) |
-| Unexpected error | `503` |
+| Unexpected error during token verification | `401` |
 
 > Whitelisting uses `PathValidator` (below); matching paths skip authentication. `OPTIONS` is always skipped (for CORS preflight).
+
+### Application tokens (external systems)
+
+Besides user JWE tokens, routes can opt in to **application tokens**: RS256 JWTs issued by OIDCContext (`typ: at+jwt`, with a `kid` header), obtained by external systems via OAuth `client_credentials` — there is **no user account**. Claims: `iss`, `aud` (OIDCContext issues `mendesky-services`), `sub` (= applicationId, exposed lowercased), `client_id`, `scope` (space-delimited), `iat`, `exp`, `jti`.
+
+| Environment variable | Required | Description |
+|---|---|---|
+| `MENDESKY_APP_TOKEN_JWKS` or `..._JWKS_PATH` | — (neither set = application tokens off) | Public verification keys (JWK Set; base64 or file path), selected by `kid` |
+| `MENDESKY_APP_TOKEN_ISSUER` | required once a key is set | Expected `iss` |
+| `MENDESKY_APP_TOKEN_AUDIENCE` | required once a key is set | Expected `aud` |
+
+```swift
+// Only routes for which acceptsApplication returns true accept application tokens
+router.add(middleware: try BearerTokenAuthenticationMiddleware(
+    acceptsApplication: { $0.uri.path == "/notification-context/notifications" }
+))
+
+// In a handler:
+switch Caller.current {
+case .application(let claims):
+    guard Scope.grants(claims.scope, Scope.notificationSend) else { throw HTTPError(.forbidden) }
+case .user(let userId, _): ...
+case nil: ...
+}
+```
+
+- `Caller.current` is a task-local `CallerIdentity?` (`.user(userId:clientId:)` / `.application(ApplicationTokenClaims)`).
+- `Scope.grants(held, required)`: passes when the token holds `*` (`Scope.all`) or exactly `required`; `Scope.notificationSend` = `notification:send`.
+- Verification checks `alg` (RS256 only), `typ`, `kid`, the signature, `iss`, `aud`, `exp`, and requires `sub`, `client_id` and `scope`; any failure is `401` (the log names the reason; **tokens are never logged**).
+- Application tokens are signed with a **dedicated key** (not the ID Token key). Several public keys may be configured; to rotate: (1) add the new public key to the JWK Set and deploy the services; (2) switch OIDCContext to the new private key; (3) remove the old public key.
+- ⚠️ `jti` gives **no replay protection**; after a client is disabled, tokens already issued stay valid until `exp` (at most 15 minutes).
+- `PermissionMiddleware` **never grants** application callers (they have no IAM user), so a route that opts in to application tokens must not also be a `PermissionRule` route.
+- Behavior changes for existing services upgrading: token verification failures answer `401` (some used to be `503`); errors thrown by handlers: those conforming to Hummingbird's `HTTPResponseError` keep their status (404 stays 404), any other error is still a `503` (generic `service unavailable.` body, the log carries only the error type); tokens are never logged.
+- Configuration problems (unreadable JWK Set, missing or duplicate `kid`, a non-RSA key or one whose `alg` is not RS256, missing issuer/audience) throw at startup.
 
 ---
 
@@ -247,6 +282,16 @@ The end-to-end integration test against a live IAMContext is gated by `IAM_BASE_
 ```bash
 IAM_BASE_URL=http://localhost:24202 swift test --filter LiveIAMIntegrationTests
 ```
+
+The `MiddlewareTesting` product provides `ApplicationTokenTestSigner`, which signs application tokens (RS256 `at+jwt`) in tests:
+
+```swift
+let signer = ApplicationTokenTestSigner()
+let jwks = ApplicationTokenTestSigner.keySetBase64([signer])   // the MENDESKY_APP_TOKEN_JWKS format
+let token = signer.token(sub: "app-1", scope: "notification:send")
+```
+
+> `MiddlewareTesting` is for tests only — do not depend on it from production targets.
 
 ---
 

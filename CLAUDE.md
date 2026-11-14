@@ -29,10 +29,15 @@ The package exposes a single `Middleware` module with two categories of middlewa
 
 ### Server-side (Hummingbird `MiddlewareProtocol` / `RouterMiddleware`)
 
-- **BearerTokenAuthenticationMiddleware** — JWE-based auth that decrypts bearer tokens using JWK keys loaded from environment variables (`MENDESKY_AUTH_RECIPIENT_JWK`, `MENDESKY_AUTH_RECIPIENT_JWK_PATH`, `MENDESKY_AUTH_SENDER_JWK`, `MENDESKY_AUTH_SENDER_JWK_PATH`, `MENDESKY_AUTH_PASSWORD`). Supports path whitelisting and auto-skips OPTIONS requests.
+- **BearerTokenAuthenticationMiddleware** — JWE-based auth that decrypts bearer tokens using JWK keys loaded from environment variables (`MENDESKY_AUTH_RECIPIENT_JWK`, `MENDESKY_AUTH_RECIPIENT_JWK_PATH`, `MENDESKY_AUTH_SENDER_JWK`, `MENDESKY_AUTH_SENDER_JWK_PATH`, `MENDESKY_AUTH_PASSWORD`). Supports path whitelisting and auto-skips OPTIONS requests. Verification failures answer 401 (never log tokens); handler errors propagate unchanged.
+- **Application tokens** (`Sources/Middleware/ApplicationToken/`) — OIDCContext RS256 `at+jwt` tokens for external systems, accepted only on routes opted in via `BearerTokenAuthenticationMiddleware(acceptsApplication:)`. Keys from `MENDESKY_APP_TOKEN_JWKS` / `MENDESKY_APP_TOKEN_JWKS_PATH` (JWK Set, selected by `kid`; neither set = off), plus `MENDESKY_APP_TOKEN_ISSUER` and `MENDESKY_APP_TOKEN_AUDIENCE`. Rotate: add new public key, deploy, switch OIDCContext, remove old key. Handlers read `Caller.current` (`CallerIdentity`) and check `Scope.grants(held, required)`. `jti` gives no replay protection; a disabled client's tokens live until `exp` (≤15 min). `PermissionMiddleware` never grants application callers, so opted-in routes must not be `PermissionRule` routes.
 - **DynamicCORSMiddleware** — Generic over `RequestContext`; origin-whitelist-based CORS with preflight handling.
 - **LoggingMiddleware** — Debug-level request/response logging.
 - **ProxyHeaderReceiverMiddleware** — Captures specified inbound headers into a `TaskLocal`-backed `SetHeaders.Management` store for downstream forwarding.
+
+### Testing product
+
+- **MiddlewareTesting** (separate product) — `ApplicationTokenTestSigner` mints application tokens in tests. Tests only; never depend on it from production targets.
 
 ### Client-side (OpenAPI `ClientMiddleware`)
 

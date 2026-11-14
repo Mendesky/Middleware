@@ -3,10 +3,15 @@ import Foundation
 import Hummingbird
 import HummingbirdTesting
 import HTTPTypes
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import JSONWebKey
 import JSONWebEncryption
 import JSONWebAlgorithms
+import MiddlewareTesting
 @testable import Middleware
 
 // MARK: - Test token plumbing (mirrors IdentityContext's JWETokenGenerator defaults)
@@ -56,6 +61,11 @@ private func makeApp(rules: [PermissionRule], provider: any PermissionsProvider)
 /// PathValidator's String init is a *literal* match; use the Regex initializer for patterns.
 private func pathRule(_ pattern: String, methods: Set<HTTPRequest.Method>? = nil, requires: [String]) throws -> PermissionRule {
     PermissionRule(PathValidator(try Regex(pattern)), methods: methods, requires: requires)
+}
+
+private actor CallCounter {
+    private(set) var count = 0
+    func increment() { count += 1 }
 }
 
 @Suite struct PermissionMiddlewareTests {
@@ -182,5 +192,23 @@ private func pathRule(_ pattern: String, methods: Set<HTTPRequest.Method>? = nil
             let res = try await client.execute(uri: "/quotations/123", method: .get, headers: bearer("not-a-valid-jwe"))
             #expect(res.status == .unauthorized)
         }
+    }
+
+    /// application token 打到有規則的路由 → 401，且不查 provider。
+    /// application caller 沒有 IAM user，PermissionMiddleware 不可能放行；token 不是 JWE，解不開就視為拿不到可信身分。
+    @Test func applicationTokenOnRuledRouteIsRefused() async throws {
+        let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
+        let called = CallCounter()
+        let provider = ClosurePermissionsProvider { _ in
+            await called.increment()
+            return ["business:read"]
+        }
+        let app = makeApp(rules: [rule], provider: provider)
+        let token = ApplicationTokenTestSigner().token(sub: "app-1")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/123", method: .get, headers: bearer(token))
+            #expect(res.status == .unauthorized)
+        }
+        #expect(await called.count == 0)
     }
 }

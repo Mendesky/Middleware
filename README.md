@@ -7,6 +7,7 @@ Mendesky 平台共用的 [Hummingbird 2.x](https://github.com/hummingbird-projec
 提供：
 
 - **認證**：JWE bearer token 解密（`BearerTokenAuthenticationMiddleware`）
+- **Application token**：外部系統用的 OIDCContext RS256 JWT，路由自行選擇接受（`Caller`、`Scope`）；測試用簽章工具在 `MiddlewareTesting`
 - **授權**：endpoint-level RBAC（`PermissionMiddleware`，即時查 IAMContext）
 - **CORS**：origin 白名單 + preflight（`DynamicCORSMiddleware`）
 - **Logging**：請求/回應 debug log（`LoggingMiddleware`）
@@ -78,9 +79,43 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | 解密失敗 / token 過期 | `401` |
 | 沒帶 `userId` header | `400` |
 | `userId` header ≠ token 內 userId | `400`（防盜用）|
-| 未預期錯誤 | `503` |
+| 驗證本身出錯（token 驗證流程的非預期錯誤）| `401` |
 
 > 白名單用 `PathValidator`（見下方），符合的路徑會跳過認證；`OPTIONS` 一律跳過（給 CORS preflight）。
+
+### Application token（外部系統）
+
+除了使用者 JWE token，路由可以選擇接受 **application token**：OIDCContext 簽發的 RS256 JWT（`typ: at+jwt`，header 帶 `kid`），給外部系統用 OAuth `client_credentials` 取得，**沒有使用者帳號**。claims：`iss`、`aud`（OIDCContext 簽發 `mendesky-services`）、`sub`（= applicationId，對外以小寫呈現）、`client_id`、`scope`（空白分隔）、`iat`、`exp`、`jti`。
+
+| 環境變數 | 必填 | 說明 |
+|---|---|---|
+| `MENDESKY_APP_TOKEN_JWKS` 或 `..._JWKS_PATH` | —（兩者皆未設 = 不接受 application token）| 驗簽公鑰（JWK Set；base64 或檔案路徑），依 `kid` 選鑰 |
+| `MENDESKY_APP_TOKEN_ISSUER` | 設了金鑰就必填 | 預期的 `iss` |
+| `MENDESKY_APP_TOKEN_AUDIENCE` | 設了金鑰就必填 | 預期的 `aud` |
+
+```swift
+// 只有 acceptsApplication 回 true 的路由才接受 application token
+router.add(middleware: try BearerTokenAuthenticationMiddleware(
+    acceptsApplication: { $0.uri.path == "/notification-context/notifications" }
+))
+
+// handler 內：
+switch Caller.current {
+case .application(let claims):
+    guard Scope.grants(claims.scope, Scope.notificationSend) else { throw HTTPError(.forbidden) }
+case .user(let userId, _): ...
+case nil: ...
+}
+```
+
+- `Caller.current` 是 task-local 的 `CallerIdentity?`（`.user(userId:clientId:)` / `.application(ApplicationTokenClaims)`）。
+- `Scope.grants(held, required)`：持有 `*`（`Scope.all`）或剛好等於 required 即通過；`Scope.notificationSend` = `notification:send`。
+- 驗證會檢查 `alg`（只收 RS256）、`typ`、`kid`、簽章、`iss`、`aud`、`exp`，且必須有 `sub`、`client_id` 與 `scope`；失敗一律 `401`（log 記錄失敗原因，**絕不記 token**）。
+- application token 用**專屬金鑰**簽（不是 ID Token 的金鑰）。可同時設定多把公鑰，輪替步驟：(1) 把新公鑰加進 JWK Set 並部署各服務；(2) OIDCContext 切到新私鑰；(3) 移除舊公鑰。
+- ⚠️ `jti` **不提供重放保護**；停用某個 client 後，已簽發的 token 仍有效直到 `exp`（最長 15 分鐘）。
+- `PermissionMiddleware` **永遠不放行** application caller（它們沒有 IAM user），所以選擇接受 application token 的路由不可同時是 `PermissionRule` 路由。
+- 升級既有服務時的行為變更：token 驗證失敗一律 `401`（部分原本是 `503`）；handler 丟出的錯誤：符合 Hummingbird `HTTPResponseError` 的保留原本狀態碼（404 仍是 404），其他錯誤仍是 `503`（body 為固定的 `service unavailable.`，log 只記錯誤型別）；token 永不寫進 log。
+- 設定錯誤（JWK Set 讀不到、缺 `kid`、重複 `kid`、非 RSA 或 `alg` 非 RS256 的金鑰、缺 issuer/audience）會在啟動時 throw。
 
 ---
 
@@ -247,6 +282,16 @@ swift test                                  # 全部單元測試（不依賴外�
 ```bash
 IAM_BASE_URL=http://localhost:24202 swift test --filter LiveIAMIntegrationTests
 ```
+
+`MiddlewareTesting` product 提供 `ApplicationTokenTestSigner`，在測試裡簽 application token（RS256 `at+jwt`）：
+
+```swift
+let signer = ApplicationTokenTestSigner()
+let jwks = ApplicationTokenTestSigner.keySetBase64([signer])   // = MENDESKY_APP_TOKEN_JWKS 的格式
+let token = signer.token(sub: "app-1", scope: "notification:send")
+```
+
+> `MiddlewareTesting` **只給測試用**，production target 不要依賴它。
 
 ---
 
