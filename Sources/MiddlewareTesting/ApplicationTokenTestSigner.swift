@@ -3,6 +3,7 @@ import _CryptoExtras
 import JSONWebAlgorithms
 import JSONWebKey
 import JSONWebSignature
+import Middleware
 
 /// Mints RS256 `at+jwt` application tokens for tests, the way OIDCContext would.
 /// Each instance owns a fresh RSA-2048 key.
@@ -37,6 +38,34 @@ public struct ApplicationTokenTestSigner: Sendable {
         // swiftlint:disable:next force_try
         let data = try! JSONEncoder().encode(Set(keys: signers.map(\.publicKey)))
         return data.base64EncodedString()
+    }
+
+    /// This signer as a trusted issuer: its own issuer and public key, with the given caller types and actors.
+    public func trustedIssuer(callerTypes: Set<CallerType>, actors: [String] = []) -> TrustedIssuer {
+        TrustedIssuer(issuer: issuer, callerTypes: callerTypes, actors: actors, publicKeys: [publicKey])
+    }
+
+    /// Base64 of the trust configuration JSON (the `MENDESKY_ACCESS_TOKEN_TRUST` format), `callerTypes` sorted.
+    public static func trustBase64(audience: String = defaultAudience, issuers: [TrustedIssuer]) -> String {
+        struct KeySet: Encodable { let keys: [JWK] }
+        struct Entry: Encodable {
+            let issuer: String
+            let callerTypes: [String]
+            let actors: [String]
+            let keys: KeySet
+        }
+        struct Document: Encodable {
+            let audience: String
+            let issuers: [Entry]
+        }
+        let document = Document(audience: audience, issuers: issuers.map {
+            Entry(
+                issuer: $0.issuer, callerTypes: $0.callerTypes.map(\.rawValue).sorted(), actors: $0.actors,
+                keys: KeySet(keys: $0.publicKeys)
+            )
+        })
+        // swiftlint:disable:next force_try
+        return try! JSONEncoder().encode(document).base64EncodedString()
     }
 
     /// `nil` for `clientId`/`scope`/`audience`/`typ` omits that field; `kid: .some(nil)` omits the header `kid`,
@@ -95,3 +124,6 @@ public struct ApplicationTokenTestSigner: Sendable {
         return "\(input).\(b64(signature))"
     }
 }
+
+/// The signer for first-party (IdentityContext) tokens in service tests; same type, a less misleading name.
+public typealias AccessTokenTestSigner = ApplicationTokenTestSigner
