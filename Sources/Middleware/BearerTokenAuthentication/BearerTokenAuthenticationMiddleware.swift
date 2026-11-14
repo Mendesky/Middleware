@@ -44,6 +44,7 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     /// MENDESKY_AUTH_SENDER_JWK: (optional) The base64 json encoded string from JWK for sender.
     /// MENDESKY_AUTH_SENDER_JWK_PATH: (optional) The file path of JWK JSON context  for sender.
     /// MENDESKY_AUTH_PASSWORD: (optional) JWK password for AUTH if needed.
+    /// MENDESKY_LEGACY_JWE: (optional) `accept` (default) | `warn` | `reject`; an invalid value throws.
     /// MENDESKY_ACCESS_TOKEN_TRUST / MENDESKY_ACCESS_TOKEN_TRUST_PATH: (optional) trusted `at+jwt` issuers; when set,
     /// first-party user tokens are accepted on every route. Application and delegated user tokens need `accepting:`.
     public init(validators: [any WhitelistValidator] = []) throws {
@@ -56,7 +57,7 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         try self.init(environment: ProcessInfo.processInfo.environment, validators: validators, accepting: accepting)
     }
 
-    /// JWE user tokens only: no signed access tokens are trusted.
+    /// JWE user tokens only: no signed access tokens are trusted. Always `.accept` for legacy JWE; ignores `MENDESKY_LEGACY_JWE`.
     public init(verification: AccessTokenVerification, validators: [any WhitelistValidator] = []) {
         self.init(verification: verification, trust: nil, validators: validators)
     }
@@ -74,7 +75,8 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     }
 
     /// Accepts application tokens from the single issuer of `applicationTokens` on the routes for which
-    /// `acceptsApplication` returns true; `nil` rejects every signed (3-segment) token.
+    /// `acceptsApplication` returns true; `nil` rejects every signed (3-segment) token. Always `.accept` for legacy JWE;
+    /// ignores `MENDESKY_LEGACY_JWE`.
     public init(
         verification: AccessTokenVerification,
         applicationTokens: ApplicationTokenVerification?,
@@ -96,6 +98,7 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     /// - Parameters:
     ///   - trust: issuers whose signed `at+jwt` are accepted; `nil` rejects every signed (3-segment) token.
     ///   - accepting: routes open to application and delegated user tokens (users pass every route).
+    ///   - legacyJWE: used as passed (default `.accept`); this initializer ignores `MENDESKY_LEGACY_JWE`.
     ///   - serviceName: reported in the legacy JWE counter log.
     public init(
         verification: AccessTokenVerification,

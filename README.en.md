@@ -71,7 +71,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 
 Behavior & status codes:
 
-> ⚠️ **On routes opened for `.application`, the `operatorId` / `userId` headers are NOT verified and pass through to the handler unchanged.** Handlers must not trust them to identify an application caller; read `Caller.current` (`if case .application(let c) = Caller.current`).
+> ⚠️ **On routes opened for `.application`, the `operatorId` / `userId` headers are NOT verified and pass through to the handler unchanged.** Handlers must not trust them to identify an application caller; read `Caller.current` (`if case .application(let c) = Caller.current`). `ProxyHeaderReceiverMiddleware` stores the header regardless of authentication and `ProxyHeaderSenderMiddleware` forwards it on every downstream call, so a caller-chosen `operatorId` travels with the application token to downstream services; a downstream that records `operatorId` in events would attribute the action to whoever the caller named.
 
 | Case | Response |
 |---|---|
@@ -93,7 +93,7 @@ Besides user JWE tokens, `BearerTokenAuthenticationMiddleware` accepts **signed 
 - **application**: an external system using OAuth `client_credentials`, with **no user account** (`sub_type: application`, `sub` is the applicationId, exposed lowercased); the route must opt in explicitly.
 - **delegatedUser**: a user's token held by an actor such as an MCP server (`sub_type: user` with an `act` claim, RFC 8693); the route must opt in explicitly.
 
-Claims: `iss`, `aud` (`mendesky-services`, string or array), `sub`, `sub_type`, `client_id`, `scope` (space-delimited; may be an empty string but must be present), `iat`, `exp`, `jti`.
+Claims: `iss`, `aud` (`mendesky-services`, string or array), `sub`, `sub_type`, `client_id`, `scope` (space-delimited; may be an empty string but must be present), `exp`. The issuer always sets `iat` and `jti`, but Middleware neither requires nor checks them.
 
 #### Trust configuration
 
@@ -139,7 +139,7 @@ Claims: `iss`, `aud` (`mendesky-services`, string or array), `sub`, `sub_type`, 
 | `warn` | Same, logged at `.warning` |
 | `reject` | 5-segment tokens are not decrypted; logs `legacy-jwe-rejected` (`.notice`) and answers `401` |
 
-Any other value fails startup. The `legacy-jwe-accepted` metadata holds only `clientId` (the clientId inside the JWE; empty for first-party), `route` (the route template such as `/items/{id}`, not the actual path; `unknown` if unavailable) and `service` (defaults to the process name, overridable via an init parameter); `legacy-jwe-rejected` holds only `route` and `service`. The logs **never contain the token or the userId**.
+Any other value fails startup. **Only** the environment-reading inits read this variable: Bearer's `init(validators:)`, `init(validators:accepting:)`, `init(validators:acceptsApplication:)`, and `PermissionMiddleware.init(rules:provider:)` (its JWE fallback, when no Bearer runs in front, honours the switch too). The explicit inits (Bearer's `init(verification:validators:)` and `init(verification:applicationTokens:validators:acceptsApplication:logger:)`, always `accept`; `init(verification:trust:legacyJWE:…)`, default `accept`; `PermissionMiddleware.init(rules:provider:verification:…)`) use the value passed (or `accept`) and **ignore** the variable. The `legacy-jwe-accepted` metadata holds only `clientId` (the clientId inside the JWE; empty for first-party), `route` (the route template such as `/items/{id}`, not the actual path; `unknown` if unavailable) and `service` (defaults to the process name, overridable via an init parameter); `legacy-jwe-rejected` holds only `route` and `service`. The logs **never contain the token or the userId**.
 
 #### Opening routes: `accepting: [RouteAcceptance]`
 
@@ -160,7 +160,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 ```
 
 - First-party users (JWE or at+jwt) need no opt-in; every route accepts them.
-- ⚠️ **On routes opened for `.application`, the `operatorId` / `userId` headers are NOT verified and pass through to the handler unchanged.** An application caller has no user, so handlers must not trust these headers; read `Caller.current` (`if case .application(let c) = Caller.current`) instead.
+- ⚠️ **On routes opened for `.application`, the `operatorId` / `userId` headers are NOT verified and pass through to the handler unchanged.** An application caller has no user, so handlers must not trust these headers; read `Caller.current` (`if case .application(let c) = Caller.current`) instead. `ProxyHeaderReceiverMiddleware` stores the header regardless of authentication and `ProxyHeaderSenderMiddleware` forwards it on every downstream call, so a caller-chosen `operatorId` travels with the application token to downstream services; a downstream that records `operatorId` in events would attribute the action to whoever the caller named.
 - The old `BearerTokenAuthenticationMiddleware(acceptsApplication:)` still works and equals `accepting: [.application(where:)]`.
 - `actors: nil` on `.delegatedUser` accepts any actor the issuer is trusted for; `requiresScope` is matched exactly (**`*` does not apply**), and a delegated token is always rejected if any scope item contains a `*` character (for example `*` or `quote:*`).
 - `PathValidator(try Regex(...))` matches the **raw request path**. Write `[^/]+` (one path segment) in examples rather than `.+`: `/quotes/.+` also matches `/quotes/1/admin`, opening the sub-paths too. For example `PathValidator(try Regex("/quotes/[^/]+"))`.
@@ -310,7 +310,7 @@ Frontend ──HTTP──▶ CORS ─▶ BearerTokenAuth (verify JWE/at+jwt, ver
 
 A protected request must carry: `Authorization: Bearer <token>` (at+jwt or legacy JWE) and `operatorId: <id>` (must equal the user id inside the token; `userId` is the deprecated fallback). Application tokens need no `operatorId`.
 
-> ⚠️ **On routes opened for `.application`, the `operatorId` / `userId` headers are NOT verified and pass through to the handler unchanged.** Handlers must not trust them for application callers; read `Caller.current` (`if case .application(let c) = Caller.current`).
+> ⚠️ **On routes opened for `.application`, the `operatorId` / `userId` headers are NOT verified and pass through to the handler unchanged.** Handlers must not trust them for application callers; read `Caller.current` (`if case .application(let c) = Caller.current`). `ProxyHeaderReceiverMiddleware` stores the header regardless of authentication and `ProxyHeaderSenderMiddleware` forwards it on every downstream call, so a caller-chosen `operatorId` travels with the application token to downstream services; a downstream that records `operatorId` in events would attribute the action to whoever the caller named.
 
 ---
 
