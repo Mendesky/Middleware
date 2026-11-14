@@ -3,15 +3,21 @@
 //  Middleware
 //
 //  Endpoint-level authorization. For requests matching a configured path-rule it:
-//    1. self-decrypts the bearer token to obtain a trusted userId,
+//    1. takes the trusted userId from `Caller.current` (set by BearerTokenAuthenticationMiddleware
+//       when it runs in front of this middleware); only when `Caller.current` is nil does it fall
+//       back to self-decrypting the JWE (deprecated; removed together with JWE in a major version),
 //    2. fetches that user's *current* permissions live via a `PermissionsProvider`
 //       (e.g. an IAMContext getPermissions adapter),
 //    3. AND-checks them against the rule's required permissions.
 //  Allow -> next(); missing permission -> 403; missing/invalid token -> 401;
 //  provider failure -> 502 (fail-closed); OPTIONS skipped.
 //
-//  An empty `rules` list makes this middleware a no-op. It self-decrypts (does not rely on
-//  BearerTokenAuthenticationMiddleware), so it is independent of middleware ordering.
+//  `.user` and `.delegatedUser` callers are looked up in IAM by userId; `.application` callers have no
+//  IAM user and are refused with 401.
+//
+//  An empty `rules` list makes this middleware a no-op. Because of the JWE fallback it still works when
+//  placed before BearerTokenAuthenticationMiddleware, but signed `at+jwt` tokens only pass when Bearer
+//  runs first.
 //
 //  Known limitation: `Context` is fixed to `BasicRequestContext` (matching
 //  BearerTokenAuthenticationMiddleware). Consumers using a custom `RequestContext` are not yet
@@ -54,7 +60,6 @@ public struct PermissionMiddleware: MiddlewareProtocol {
             return try await next(input, context)
         }
 
-        // Obtain a trusted userId by decrypting the bearer token ourselves.
         guard let userId = trustedUserId(from: input) else {
             return Response(status: .unauthorized)
         }
@@ -77,6 +82,22 @@ public struct PermissionMiddleware: MiddlewareProtocol {
     }
 
     private func trustedUserId(from request: Request) -> String? {
+        switch Caller.current {
+        case .user(let userId, _):
+            return userId
+        case .delegatedUser(let claims):
+            return claims.userId
+        case .application:
+            // An application caller has no IAM user.
+            return nil
+        case nil:
+            return legacyTrustedUserId(from: request)
+        }
+    }
+
+    /// Deprecated fallback for when no BearerTokenAuthenticationMiddleware runs in front: decrypt the JWE
+    /// ourselves. Removed together with JWE support in a major version.
+    private func legacyTrustedUserId(from request: Request) -> String? {
         guard let authorization = request.headers.first(where: { $0.name == .authorization }),
               let token = AccessTokenVerification.bearerToken(fromHeaderValue: authorization.value),
               let payload = try? verification.decrypt(compactString: token) else {

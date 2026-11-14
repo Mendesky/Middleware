@@ -29,9 +29,9 @@ func icOcTrust(ocActors: [String] = ["mendesky-mcp-server"]) throws -> AccessTok
 let testRecipientKey: JWK = P256.KeyAgreement.PrivateKey().jwkRepresentation
 
 /// A legacy JWE user token (5 segments) for `testRecipientKey`.
-func jweUserToken(userId: String, clientId: String = "c") throws -> String {
+func jweUserToken(userId: String, clientId: String = "c", expiresIn: TimeInterval = 3600) throws -> String {
     let payload = AccessTokenPayload(
-        authorizationId: "a", userId: userId, clientId: clientId, scope: [], expiresAt: Date(timeIntervalSinceNow: 3600))
+        authorizationId: "a", userId: userId, clientId: clientId, scope: [], expiresAt: Date(timeIntervalSinceNow: expiresIn))
     let jwe = try JWE(
         payload: try JSONEncoder().encode(payload), keyManagementAlg: .ecdhESA256KW, encryptionAlgorithm: .a256GCM,
         recipientKey: testRecipientKey)
