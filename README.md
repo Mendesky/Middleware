@@ -139,7 +139,7 @@ claims：`iss`、`aud`（`mendesky-services`，字串或陣列皆可）、`sub`�
 | `warn` | 同上，但以 `.warning` 記錄 |
 | `reject` | 5 段 token 不解密，記 `legacy-jwe-rejected`（`.notice`）並回 `401` |
 
-其他值會啟動失敗。**只有**讀環境變數的 init 會讀這個變數：Bearer 的 `init(validators:)`、`init(validators:accepting:)`、`init(validators:acceptsApplication:)`，以及 `PermissionMiddleware.init(rules:provider:)`（沒有 Bearer 在前面時的 JWE fallback 同樣遵守此開關）。明確傳參數的 init（Bearer 的 `init(verification:validators:)`、`init(verification:applicationTokens:validators:acceptsApplication:logger:)` 永遠是 `accept`；`init(verification:trust:legacyJWE:…)` 預設 `accept`；`PermissionMiddleware.init(rules:provider:verification:…)`）使用傳入的值（或 `accept`），**忽略**此環境變數。`legacy-jwe-accepted` 的 metadata 只有 `clientId`（JWE 內的 clientId，第一方為空字串）、`route`（路由樣板如 `/items/{id}`，不是實際路徑；取不到時為 `unknown`）、`service`（預設為 process 名稱，可由 init 參數覆寫）；`legacy-jwe-rejected` 只有 `route`、`service`。log **不含 token、不含 userId**。
+其他值會啟動失敗。**只有**讀環境變數的 init 會讀這個變數：Bearer 的 `init(validators:)`、`init(validators:accepting:)`、`init(validators:acceptsApplication:)`，以及 `PermissionMiddleware.init(rules:provider:)`（沒有 Bearer 在前面時的 JWE fallback 同樣遵守此開關）。明確傳參數的 init（Bearer 的 `init(verification:validators:)`、`init(verification:applicationTokens:validators:acceptsApplication:logger:)` 永遠是 `accept`；`init(verification:trust:legacyJWE:…)` 預設 `accept`；`PermissionMiddleware.init(rules:provider:verification:…)`）使用傳入的值（或 `accept`），**忽略**此環境變數。`legacy-jwe-accepted` 的 metadata 只有 `clientId`（JWE 內的 clientId，第一方為空字串）、`route`（路由樣板如 `/items/{id}`，不是實際路徑；取不到時為 `unknown`）、`service`（預設為 process 名稱，可由 init 參數覆寫）；`legacy-jwe-rejected` 只有 `route`、`service`。log **不含 token、不含 userId**。若 `PermissionMiddleware` 放在 Bearer 前面，同一個 JWE 會被記兩次 `legacy-jwe-accepted`，Permission 也會先記下之後被 Bearer 以 `400` 擋掉的請求；計數只會多算、不會少算，不影響用「計數歸零」判斷能否移除 JWE。
 
 #### 開放路由：`accepting: [RouteAcceptance]`
 
@@ -161,6 +161,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 
 - 第一方 user（JWE 或 at+jwt）不需要開放，所有路由都收。
 - ⚠️ **在開放給 `.application` 的路由上，`operatorId` / `userId` header 不會被驗證，會原封不動傳到 handler。** application 呼叫者沒有使用者，handler 不可信任這些 header；請讀 `Caller.current`（`if case .application(let c) = Caller.current`）取得呼叫者。 `ProxyHeaderReceiverMiddleware` 不論是否通過驗證都會收下該 header，`ProxyHeaderSenderMiddleware` 會把它轉發到每一次下游呼叫，所以呼叫者自行指定的 `operatorId` 會連同 application token 一路傳到下游服務；下游若把 `operatorId` 記進事件，該行為就會被歸給呼叫者指定的人。
+- 同一條路由符合多個 `RouteAcceptance` 時是**聯集（OR）**：只要任一條放行就放行。之後再加一條較寬的規則（例如不限 actor），會靜默放寬原本有 actor 限定的那條。
 - 舊的 `BearerTokenAuthenticationMiddleware(acceptsApplication:)` 仍可用，等同 `accepting: [.application(where:)]`。
 - `.delegatedUser` 的 `actors: nil` 表示接受該發行者信任清單內的任何 actor；`requiresScope` 用精確比對，**不適用 `*`**，且代理 token 的任一 scope 項目只要含 `*` 字元（例如 `*`、`quote:*`）一律拒絕。
 - `PathValidator(try Regex(...))` 比對的是**原始請求路徑**。範例請寫 `[^/]+`（單一路徑段）而不是 `.+`：`/quotes/.+` 也會匹配 `/quotes/1/admin`，等於把子路徑一併開放。例如 `PathValidator(try Regex("/quotes/[^/]+"))`。
@@ -177,7 +178,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | `.application` | 不需要 `operatorId`；若有帶也**不驗證**，原樣傳給 handler（見上方警告）|
 | 5 段 token 且 `MENDESKY_LEGACY_JWE=reject` | `401` |
 
-驗證只收 RS256（固定演算法、不從 token 取），並檢查 `typ`、`kid`、簽章、`iss`、`aud`、`exp`；失敗的原因記在 log，**絕不記 token**。
+驗證只收 RS256（固定演算法、不從 token 取），header 必須剛好是 `{alg, typ, kid}`（多帶 `crit`、`jwk` 等參數一律拒收），並檢查 `typ`、`kid`、簽章、`iss`、`aud`、`exp`，且 `sub`、`sub_type`、`client_id`、`scope` 必須存在；失敗的原因記在 log，**絕不記 token**。
 
 #### 在 handler 裡取得呼叫者
 
