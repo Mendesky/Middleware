@@ -33,6 +33,7 @@ private func describe(_ caller: CallerIdentity?) -> String {
     switch caller {
     case .application(let c): return "application:\(c.applicationId)"
     case .user(let u, let c): return "user:\(u):\(c)"
+    case .delegatedUser(let d): return "delegatedUser:\(d.userId):\(d.actor)"
     case nil: return "none"
     }
 }

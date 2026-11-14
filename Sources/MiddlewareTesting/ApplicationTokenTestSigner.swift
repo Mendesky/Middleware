@@ -68,8 +68,10 @@ public struct ApplicationTokenTestSigner: Sendable {
         return try! JSONEncoder().encode(document).base64EncodedString()
     }
 
-    /// `nil` for `clientId`/`scope`/`audience`/`typ` omits that field; `kid: .some(nil)` omits the header `kid`,
-    /// `.none` uses the signer's own. `audienceAsString` emits `aud` as a bare string (first entry) instead of an array.
+    /// `nil` for `clientId`/`scope`/`audience`/`typ`/`subType` omits that field; `kid: .some(nil)` omits the header
+    /// `kid`, `.none` uses the signer's own. `audienceAsString` emits `aud` as a bare string (first entry) instead of
+    /// an array. `actors` builds a nested `act` claim, outermost first (`["a", "b"]` gives
+    /// `{"sub": "a", "act": {"sub": "b"}}`); empty omits `act`.
     public func token(
         sub: String,
         clientId: String? = "client-1",
@@ -79,7 +81,9 @@ public struct ApplicationTokenTestSigner: Sendable {
         typ: String? = "at+jwt",
         kid kidOverride: String?? = .none,
         issuer issuerOverride: String? = nil,
-        audienceAsString: Bool = false
+        audienceAsString: Bool = false,
+        subType: String? = "application",
+        actors: [String] = []
     ) -> String {
         var header: [String: Any] = ["alg": "RS256"]
         if let typ { header["typ"] = typ }
@@ -100,6 +104,13 @@ public struct ApplicationTokenTestSigner: Sendable {
         if let clientId { claims["client_id"] = clientId }
         if let scope { claims["scope"] = scope }
         if let audience { claims["aud"] = audienceAsString ? audience.first as Any : audience }
+        if let subType { claims["sub_type"] = subType }
+        let act = actors.reversed().reduce(nil as [String: Any]?) { inner, actor in
+            var level: [String: Any] = ["sub": actor]
+            if let inner { level["act"] = inner }
+            return level
+        }
+        if let act { claims["act"] = act }
 
         // swiftlint:disable:next force_try
         let jws = try! JWS(
