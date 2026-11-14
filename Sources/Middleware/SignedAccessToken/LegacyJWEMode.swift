@@ -9,13 +9,16 @@ public enum LegacyJWEMode: String, Sendable {
     /// Refuse JWE tokens with `401`.
     case reject
 
-    /// Reads `MENDESKY_LEGACY_JWE`.
-    // TODO(Task 5): parse `MENDESKY_LEGACY_JWE` (accept | warn | reject; blank = accept; other values throw).
-    // Until then every environment yields `.accept`, which is the behaviour before this setting existed.
+    /// Reads `MENDESKY_LEGACY_JWE`: `accept` (default; unset or blank), `warn` or `reject`, case-insensitive.
+    /// Any other value throws, so the service refuses to start.
     public static func fromEnvironment(
         _ env: [String: String] = ProcessInfo.processInfo.environment
     ) throws(LegacyJWEModeError) -> LegacyJWEMode {
-        .accept
+        guard let raw = env["MENDESKY_LEGACY_JWE"] else { return .accept }
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.isEmpty { return .accept }
+        guard let mode = LegacyJWEMode(rawValue: normalized) else { throw LegacyJWEModeError(value: raw) }
+        return mode
     }
 }
 
@@ -23,4 +26,10 @@ public enum LegacyJWEMode: String, Sendable {
 public struct LegacyJWEModeError: Error, Equatable {
     /// The configured value, as set.
     public let value: String
+}
+
+extension LegacyJWEModeError: CustomStringConvertible {
+    public var description: String {
+        "MENDESKY_LEGACY_JWE must be one of accept, warn, reject (got \"\(value)\")"
+    }
 }

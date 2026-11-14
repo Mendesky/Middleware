@@ -125,6 +125,7 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         let legacyJWE = try LegacyJWEMode.fromEnvironment(environment)
         let verification = try AccessTokenVerification.fromEnvironment()
         self.init(verification: verification, trust: trust, legacyJWE: legacyJWE, validators: validators, accepting: accepting)
+        logger.notice("Legacy JWE mode: \(legacyJWE.rawValue)")
 
         if let trust {
             let issuers = trust.issuers.map { issuer in
@@ -180,7 +181,8 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         }
 
         let authenticated: Authenticated
-        switch authenticate(token) {
+        let route = context.endpointPath ?? "unknown"
+        switch authenticate(token, route: route) {
         case .rejected(let response): return response
         case .authenticated(let result): authenticated = result
         }
@@ -211,6 +213,13 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
             }
         }
 
+        // Counted only here: decrypted, admitted and operator-checked. Never carries the token or the userId.
+        if authenticated.viaLegacyJWE, case .user(_, let clientId) = identity {
+            logger.log(level: legacyJWE == .warn ? .warning : .notice, "legacy-jwe-accepted", metadata: [
+                "clientId": .string(clientId), "route": .string(route), "service": .string(serviceName),
+            ])
+        }
+
         // Downstream runs outside the verification, so its errors never become 401.
         do {
             return try await Caller.$current.withValue(identity) {
@@ -239,7 +248,7 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
 
     /// Verifies the token by its shape: 3 segments = signed `at+jwt`, 5 = legacy JWE, anything else is refused.
     /// Never logs the token (or anything derived from it); the error case or type is enough to diagnose.
-    private func authenticate(_ token: String) -> Authentication {
+    private func authenticate(_ token: String, route: String) -> Authentication {
         switch token.split(separator: ".", omittingEmptySubsequences: false).count {
         case 3:
             guard let signed else {
@@ -254,6 +263,13 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
                 return .rejected(Self.unauthorized("access token rejected."))
             }
         case 5:
+            // Retired: never decrypt, so a refused JWE costs nothing.
+            if legacyJWE == .reject {
+                logger.notice("legacy-jwe-rejected", metadata: [
+                    "route": .string(route), "service": .string(serviceName),
+                ])
+                return .rejected(Self.unauthorized("access token rejected."))
+            }
             do {
                 guard let payload = try verification.decrypt(compactString: token) else {
                     return .rejected(Self.unauthorized("access token decrypt failed."))
