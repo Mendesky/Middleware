@@ -38,16 +38,14 @@ public struct SignedAccessTokenVerification: Sendable {
 
     public func verify(compactString: String) throws(AccessTokenError) -> CallerIdentity {
         let segments = compactString.split(separator: ".", omittingEmptySubsequences: false)
-        guard segments.count == 3,
-              let headerData = base64URLDecode(segments[0]),
-              let header = (try? JSONSerialization.jsonObject(with: headerData)) as? [String: Any]
-        else { throw .malformed }
+        guard segments.count == 3, let headerSegment = jsonObjectSegment(segments[0]) else { throw .malformed }
+        let header = headerSegment.object
 
         // Parsers disagree on duplicate keys (first vs last wins), so a header naming `"alg"` twice is refused outright.
         // A JSON escape could spell a second `alg` without the literal text (`"\u0061lg"`), so backslashes are refused
         // too. The one exception is `\/`: Foundation's JSON writers emit `application/at+jwt` as `application\/at+jwt`,
         // and `/` cannot spell `alg`. (Removing `\/` pairs leaves a stray backslash from `\\/`, which is refused.)
-        let rawHeader = String(decoding: headerData, as: UTF8.self)
+        let rawHeader = String(decoding: headerSegment.data, as: UTF8.self)  // UTF-8, checked by `jsonObjectSegment`.
         guard !rawHeader.replacingOccurrences(of: "\\/", with: "").contains("\\"),
               rawHeader.components(separatedBy: "\"alg\"").count <= 2
         else { throw .malformed }
@@ -60,9 +58,7 @@ public struct SignedAccessTokenVerification: Sendable {
 
         // Before the signature is checked, only the (unverified) `iss` is read, and only to choose the key:
         // the kid must belong to that issuer, so one issuer's key can never vouch for another issuer's token.
-        guard let payloadData = base64URLDecode(segments[1]),
-              let claims = (try? JSONSerialization.jsonObject(with: payloadData)) as? [String: Any]
-        else { throw .malformed }
+        guard let claims = jsonObjectSegment(segments[1])?.object else { throw .malformed }
         guard let issuerName = claims["iss"] as? String, let trusted = trust.issuer(named: issuerName) else {
             throw .untrustedIssuer
         }
@@ -132,6 +128,17 @@ public struct SignedAccessTokenVerification: Sendable {
             ))
         }
     }
+}
+
+/// Decodes a header or payload segment: strict base64url, then a JSON object. The bytes must be UTF-8 (RFC 7515 §4,
+/// §5.2) beginning with `{` and containing no NUL. `JSONSerialization` would otherwise auto-detect UTF-16/UTF-32 (with
+/// or without a BOM), and the raw-text header checks, which read UTF-8, would not see what the parser sees.
+private func jsonObjectSegment(_ segment: Substring) -> (data: Data, object: [String: Any])? {
+    guard let data = base64URLDecode(segment),
+          data.first == 0x7B, !data.contains(0x00), String(data: data, encoding: .utf8) != nil,
+          let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    else { return nil }
+    return (data, object)
 }
 
 /// Decodes unpadded base64url (RFC 7515 §2), strictly: only `[A-Za-z0-9_-]`, no `=` padding, and only the canonical

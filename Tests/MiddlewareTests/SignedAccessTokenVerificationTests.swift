@@ -272,6 +272,37 @@ private func claimsJSON(exp: Int = 99999999999, extra: String = "") -> String {
         expectError(.malformed, v, token + "==")
     }
 
+    /// `JSONSerialization` auto-detects UTF-16/UTF-32, which would hide a duplicate `"alg"` from the UTF-8 text check.
+    @Test func rejectsHeaderNotInUTF8() throws {
+        let v = try verification()
+        let header = #"{"alg":"RS256","typ":"at+jwt","kid":"oc-1","alg":"none"}"#
+        let payload = Data(claimsJSON().utf8)
+        for encoding: String.Encoding in [.utf16LittleEndian, .utf16BigEndian, .utf32LittleEndian, .utf16] {
+            let headerData = try #require(header.data(using: encoding))
+            expectError(.malformed, v, oc.rawToken(headerData: headerData, payloadData: payload))
+        }
+    }
+
+    @Test func rejectsBOMOrWhitespaceBeforeHeader() throws {
+        let v = try verification()
+        let header = Data(#"{"alg":"RS256","typ":"at+jwt","kid":"oc-1"}"#.utf8)
+        let payload = Data(claimsJSON().utf8)
+        let plain = oc.rawToken(headerData: header, payloadData: payload)
+        #expect(throws: Never.self) { try v.verify(compactString: plain) }
+        expectError(.malformed, v, oc.rawToken(headerData: Data([0xEF, 0xBB, 0xBF]) + header, payloadData: payload))
+        expectError(.malformed, v, oc.rawToken(headerData: Data(" ".utf8) + header, payloadData: payload))
+    }
+
+    @Test func rejectsPayloadNotInUTF8() throws {
+        let v = try verification()
+        let header = Data(#"{"alg":"RS256","typ":"at+jwt","kid":"oc-1"}"#.utf8)
+        let utf16Payload = try #require(claimsJSON().data(using: .utf16LittleEndian))
+        // Validly signed by a trusted key: only the encoding is wrong.
+        expectError(.malformed, v, oc.rawToken(headerData: header, payloadData: utf16Payload))
+        let bomPayload = Data([0xEF, 0xBB, 0xBF]) + Data(claimsJSON().utf8)
+        expectError(.malformed, v, oc.rawToken(headerData: header, payloadData: bomPayload))
+    }
+
     @Test func rejectsImpossibleSegmentLength() throws {
         let token = oc.token(sub: "app-1")
         let parts = token.split(separator: ".")

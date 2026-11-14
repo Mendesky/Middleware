@@ -119,6 +119,11 @@ public struct ApplicationTokenTestSigner: Sendable {
         signed(header: Data(headerJSON.utf8), payload: Data(payloadJSON.utf8))
     }
 
+    /// Like `rawToken(headerJSON:payloadJSON:)`, over arbitrary bytes (e.g. JSON in another text encoding).
+    public func rawToken(headerData: Data, payloadData: Data) -> String {
+        signed(header: headerData, payload: payloadData)
+    }
+
     /// Compact RS256 JWS over the given header and payload bytes. Signs with the BoringSSL-backed `_RSA` key
     /// (RSASSA-PKCS1-v1_5 over SHA-256, i.e. RS256): jose-swift's pure-Swift RS256 signer is far too slow for tests.
     private func signed(header: Data, payload: Data) -> String {
