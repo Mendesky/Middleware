@@ -55,6 +55,8 @@ public struct SignedAccessTokenVerification: Sendable {
               typ == "at+jwt" || typ == "application/at+jwt"
         else { throw .wrongType }
         guard let kid = header["kid"] as? String else { throw .unknownKey }
+        // The header is exactly {alg, typ, kid}: `crit`, `jwk`, `x5u`, `b64`, ... are never accepted.
+        guard Set(header.keys) == ["alg", "typ", "kid"] else { throw .malformed }
 
         // Before the signature is checked, only the (unverified) `iss` is read, and only to choose the key:
         // the kid must belong to that issuer, so one issuer's key can never vouch for another issuer's token.

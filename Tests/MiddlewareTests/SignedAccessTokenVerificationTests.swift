@@ -176,6 +176,18 @@ private func claimsJSON(exp: Int = 99999999999, extra: String = "") -> String {
         expectError(.malformed, try verification(), token)
     }
 
+    /// The header is exactly `{alg, typ, kid}`: `crit`, `jwk`, `x5u`, `b64`, ... are refused even when correctly signed.
+    @Test func rejectsExtraHeaderParameters() throws {
+        let v = try verification()
+        let base = #""alg":"RS256","typ":"at+jwt","kid":"oc-1""#
+        #expect(throws: Never.self) {
+            try v.verify(compactString: oc.rawToken(headerJSON: "{\(base)}", payloadJSON: claimsJSON()))
+        }
+        for extra in [#""crit":["b64"],"b64":false"#, #""jwk":{"kty":"RSA","n":"AQAB","e":"AQAB"}"#, #""x5u":"https://evil.test/k""#] {
+            expectError(.malformed, v, oc.rawToken(headerJSON: "{\(base),\(extra)}", payloadJSON: claimsJSON()))
+        }
+    }
+
     /// A JSON escape spells a second `alg` without a second literal `"alg"`.
     @Test func rejectsDuplicateAlgSpelledWithAnEscape() throws {
         let v = try verification()
