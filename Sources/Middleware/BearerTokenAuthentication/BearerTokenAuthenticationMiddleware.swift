@@ -14,6 +14,16 @@ public enum BearerTokenAuthenticationMiddlewareError: Error {
     case  recipientKeyNotFoundInEnvironment
 }
 
+/// Authenticates the bearer token and runs the handler with `Caller.current` set.
+///
+/// - 5-segment tokens are legacy JWE user tokens (`MENDESKY_AUTH_*` keys) → `.user`.
+/// - 3-segment tokens are signed `at+jwt` from the issuers in the access token trust configuration
+///   (`MENDESKY_ACCESS_TOKEN_TRUST` / `MENDESKY_ACCESS_TOKEN_TRUST_PATH`) → `.user`, `.application` or
+///   `.delegatedUser`; without a trust configuration they are refused with `401`.
+///
+/// A `.user` passes every route; `.application` and `.delegatedUser` only routes opened by a `RouteAcceptance`
+/// (`401` otherwise, `403` when a delegated user's scope lacks the route's required scope). `.user` and
+/// `.delegatedUser` callers must send an `operatorId` header equal to the token's subject (`400` otherwise).
 public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     public typealias Input = Request
     public typealias Output = Response
@@ -21,9 +31,12 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
 
     let logger: Logger
     let verification: AccessTokenVerification
-    let applicationTokens: ApplicationTokenVerification?
-    let acceptsApplication: @Sendable (Request) -> Bool
+    /// `nil` when no trust is configured: every 3-segment token is refused.
+    let signed: SignedAccessTokenVerification?
+    let legacyJWE: LegacyJWEMode
+    let accepting: [RouteAcceptance]
     let validators: [any WhitelistValidator]
+    let serviceName: String
 
     private static let defaultLogger = Logger(label: "IdentityContext.BearerTokenAuthenticationMiddleware")
 
@@ -33,39 +46,36 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     /// MENDESKY_AUTH_SENDER_JWK: (optional) The base64 json encoded string from JWK for sender.
     /// MENDESKY_AUTH_SENDER_JWK_PATH: (optional) The file path of JWK JSON context  for sender.
     /// MENDESKY_AUTH_PASSWORD: (optional) JWK password for AUTH if needed.
+    /// MENDESKY_ACCESS_TOKEN_TRUST / MENDESKY_ACCESS_TOKEN_TRUST_PATH: (optional) trusted `at+jwt` issuers; when set,
+    /// first-party user tokens are accepted on every route. Application and delegated user tokens need `accepting:`.
     public init(validators: [any WhitelistValidator] = []) throws {
-        // Single source of truth for the MENDESKY_AUTH_* key loading.
-        self.verification = try AccessTokenVerification.fromEnvironment()
-        self.applicationTokens = nil
-        self.acceptsApplication = { _ in false }
-        self.validators = validators
-        self.logger = Self.defaultLogger
+        try self.init(environment: ProcessInfo.processInfo.environment, validators: validators, accepting: [])
     }
 
+    /// Reads the same environment as `init(validators:)` and opens the given routes to application and delegated
+    /// user tokens. Throws when the trust configuration is invalid (or uses a renamed `MENDESKY_APP_TOKEN_*` variable).
+    public init(validators: [any WhitelistValidator] = [], accepting: [RouteAcceptance]) throws {
+        try self.init(environment: ProcessInfo.processInfo.environment, validators: validators, accepting: accepting)
+    }
+
+    /// JWE user tokens only: no signed access tokens are trusted.
     public init(verification: AccessTokenVerification, validators: [any WhitelistValidator] = []) {
-        self.verification = verification
-        self.applicationTokens = nil
-        self.acceptsApplication = { _ in false }
-        self.validators = validators
-        self.logger = Self.defaultLogger
+        self.init(verification: verification, trust: nil, validators: validators)
     }
 
-    /// Also accepts application tokens (OIDCContext `at+jwt`) on the routes for which `acceptsApplication` returns true.
-    /// Application keys come from `MENDESKY_APP_TOKEN_JWKS` / `_JWKS_PATH`; when unset, application tokens are always rejected.
+    /// Also accepts application tokens on the routes for which `acceptsApplication` returns true.
+    /// Trusted issuers come from `MENDESKY_ACCESS_TOKEN_TRUST` / `MENDESKY_ACCESS_TOKEN_TRUST_PATH`; when neither is
+    /// set, every signed (3-segment) token is rejected. Same as `init(validators:accepting: [.application(where:)])`.
     public init(validators: [any WhitelistValidator] = [], acceptsApplication: @escaping @Sendable (Request) -> Bool) throws {
-        self.verification = try AccessTokenVerification.fromEnvironment()
-        // TODO(Task 4): `ApplicationTokenVerification.fromEnvironment` is gone; this init is rewritten onto `AccessTokenTrust`.
-        self.applicationTokens = nil
-        self.acceptsApplication = acceptsApplication
-        self.validators = validators
-        self.logger = Self.defaultLogger
-        if let applicationTokens {
-            logger.notice("Application tokens enabled: kids=\(applicationTokens.kids), issuer=\(applicationTokens.issuer), audience=\(applicationTokens.audience)")
-        } else {
-            logger.notice("Application tokens disabled: MENDESKY_APP_TOKEN_JWKS / MENDESKY_APP_TOKEN_JWKS_PATH not set")
-        }
+        try self.init(
+            environment: ProcessInfo.processInfo.environment,
+            validators: validators,
+            accepting: [.application(where: acceptsApplication)]
+        )
     }
 
+    /// Accepts application tokens from the single issuer of `applicationTokens` on the routes for which
+    /// `acceptsApplication` returns true; `nil` rejects every signed (3-segment) token.
     public init(
         verification: AccessTokenVerification,
         applicationTokens: ApplicationTokenVerification?,
@@ -73,10 +83,76 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         acceptsApplication: @escaping @Sendable (Request) -> Bool,
         logger: Logger = Logger(label: "IdentityContext.BearerTokenAuthenticationMiddleware")
     ) {
+        self.init(
+            verification: verification,
+            signed: applicationTokens?.signed,
+            legacyJWE: .accept,
+            validators: validators,
+            accepting: [.application(where: acceptsApplication)],
+            serviceName: ProcessInfo.processInfo.processName,
+            logger: logger
+        )
+    }
+
+    /// - Parameters:
+    ///   - trust: issuers whose signed `at+jwt` are accepted; `nil` rejects every signed (3-segment) token.
+    ///   - accepting: routes open to application and delegated user tokens (users pass every route).
+    ///   - serviceName: reported in the legacy JWE counter log.
+    public init(
+        verification: AccessTokenVerification,
+        trust: AccessTokenTrust?,
+        legacyJWE: LegacyJWEMode = .accept,
+        validators: [any WhitelistValidator] = [],
+        accepting: [RouteAcceptance] = [],
+        serviceName: String = ProcessInfo.processInfo.processName,
+        logger: Logger = Logger(label: "IdentityContext.BearerTokenAuthenticationMiddleware")
+    ) {
+        self.init(
+            verification: verification,
+            signed: trust.map { SignedAccessTokenVerification(trust: $0) },
+            legacyJWE: legacyJWE,
+            validators: validators,
+            accepting: accepting,
+            serviceName: serviceName,
+            logger: logger
+        )
+    }
+
+    /// Loads, in order, the access token trust and the legacy JWE mode from `environment`, then the
+    /// `MENDESKY_AUTH_*` JWE keys (from the process environment); any invalid setting throws.
+    init(environment: [String: String], validators: [any WhitelistValidator], accepting: [RouteAcceptance]) throws {
+        let trust = try AccessTokenTrust.fromEnvironment(environment)
+        let legacyJWE = try LegacyJWEMode.fromEnvironment(environment)
+        let verification = try AccessTokenVerification.fromEnvironment()
+        self.init(verification: verification, trust: trust, legacyJWE: legacyJWE, validators: validators, accepting: accepting)
+
+        if let trust {
+            let issuers = trust.issuers.map { issuer in
+                let callerTypes = issuer.callerTypes.map(\.rawValue).sorted()
+                let kids = issuer.publicKeys.compactMap(\.keyID).sorted()
+                return "issuer=\(issuer.issuer) callerTypes=\(callerTypes) actors=\(issuer.actors) kids=\(kids)"
+            }
+            logger.notice("Signed access tokens enabled: audience=\(trust.audience); \(issuers.joined(separator: "; "))")
+        } else {
+            logger.notice("Signed access tokens disabled: MENDESKY_ACCESS_TOKEN_TRUST / MENDESKY_ACCESS_TOKEN_TRUST_PATH not set")
+        }
+    }
+
+    private init(
+        verification: AccessTokenVerification,
+        signed: SignedAccessTokenVerification?,
+        legacyJWE: LegacyJWEMode,
+        validators: [any WhitelistValidator],
+        accepting: [RouteAcceptance],
+        serviceName: String,
+        logger: Logger
+    ) {
         self.verification = verification
-        self.applicationTokens = applicationTokens
-        self.acceptsApplication = acceptsApplication
+        self.signed = signed
+        self.legacyJWE = legacyJWE
         self.validators = validators
+        self.accepting = accepting
+        self.serviceName = serviceName
         self.logger = logger
     }
 
@@ -103,50 +179,39 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
             return Response.init(status: .badRequest)
         }
 
-        let identity: CallerIdentity
-        let isApplicationToken = token.split(separator: ".", omittingEmptySubsequences: false).count == 3
-        do {
-            if isApplicationToken {
-                // Application token: only on opted-in routes, only when keys are configured.
-                guard let applicationTokens else {
-                    logger.notice("Application token rejected: application tokens are not configured")
-                    return Self.unauthorized("application token rejected.")
-                }
-                guard acceptsApplication(input) else {
-                    logger.notice("Application token rejected: route did not opt in to application tokens")
-                    return Self.unauthorized("application token rejected.")
-                }
-                do {
-                    identity = .application(try applicationTokens.verify(compactString: token))
-                } catch {
-                    // `ApplicationTokenError` cases carry no token data (`missingClaim` only a claim name).
-                    logger.notice("Application token verification failed: \(error)")
-                    return Self.unauthorized("access token rejected.")
-                }
+        let authenticated: Authenticated
+        switch authenticate(token) {
+        case .rejected(let response): return response
+        case .authenticated(let result): authenticated = result
+        }
+        let identity = authenticated.identity
+
+        switch accepting.admission(of: identity, for: input) {
+        case .admitted:
+            break
+        case .notOptedIn:
+            if case .delegatedUser = identity {
+                logger.notice("Signed access token rejected: route did not opt in to delegated user tokens")
             } else {
-                guard let payload = try self.verification.decrypt(compactString: token) else {
-                    return Self.unauthorized("access token decrypt failed.")
-                }
-
-                // Verify the caller-asserted operator identity matches the token payload to prevent
-                // token theft. `operatorId` is canonical; `userId` is the deprecated fallback. Both
-                // are compared against `payload.userId` (the token payload field is unchanged).
-                guard let assertedOperatorId = AccessTokenVerification.operatorId(fromHeaders: input.headers) else {
-                    return Response.init(status: .badRequest)
-                }
-
-                guard assertedOperatorId == payload.userId else {
-                    return Response(status: .badRequest)
-                }
-                identity = .user(userId: payload.userId, clientId: payload.clientId)
+                logger.notice("Signed access token rejected: route did not opt in to application tokens")
             }
-        } catch {
-            // Never log the token (or anything derived from it); the error type is enough to diagnose.
-            logger.notice("Bearer token verification failed: \(type(of: error))")
             return Self.unauthorized("access token rejected.")
+        case .insufficientScope:
+            logger.notice("Signed access token rejected: insufficient scope")
+            return Self.response(.forbidden, "insufficient scope.")
         }
 
-        // Downstream runs outside the verification do/catch, so its errors never become 401.
+        // Verify the caller-asserted operator identity matches the token subject to prevent token theft.
+        // `operatorId` is canonical; `userId` is the deprecated fallback. Application callers have no operator.
+        if let subject = Self.operatorSubject(of: identity) {
+            guard let assertedOperatorId = AccessTokenVerification.operatorId(fromHeaders: input.headers),
+                  assertedOperatorId == subject
+            else {
+                return Response(status: .badRequest)
+            }
+        }
+
+        // Downstream runs outside the verification, so its errors never become 401.
         do {
             return try await Caller.$current.withValue(identity) {
                 try await next(input, context)
@@ -158,6 +223,59 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
             // log carry only the error type (the description may include request data).
             logger.error("Downstream handler failed: \(type(of: error))")
             return Self.response(.serviceUnavailable, "service unavailable.")
+        }
+    }
+
+    /// A verified caller, and whether it came from a legacy JWE token (as opposed to a signed `at+jwt`).
+    private struct Authenticated {
+        let identity: CallerIdentity
+        let viaLegacyJWE: Bool
+    }
+
+    private enum Authentication {
+        case authenticated(Authenticated)
+        case rejected(Response)
+    }
+
+    /// Verifies the token by its shape: 3 segments = signed `at+jwt`, 5 = legacy JWE, anything else is refused.
+    /// Never logs the token (or anything derived from it); the error case or type is enough to diagnose.
+    private func authenticate(_ token: String) -> Authentication {
+        switch token.split(separator: ".", omittingEmptySubsequences: false).count {
+        case 3:
+            guard let signed else {
+                logger.notice("Signed access token rejected: access token trust is not configured")
+                return .rejected(Self.unauthorized("access token rejected."))
+            }
+            do {
+                return .authenticated(Authenticated(identity: try signed.verify(compactString: token), viaLegacyJWE: false))
+            } catch {
+                // `AccessTokenError` cases carry no token data (`missingClaim` only a claim name).
+                logger.notice("Signed access token verification failed: \(error)")
+                return .rejected(Self.unauthorized("access token rejected."))
+            }
+        case 5:
+            do {
+                guard let payload = try verification.decrypt(compactString: token) else {
+                    return .rejected(Self.unauthorized("access token decrypt failed."))
+                }
+                let identity = CallerIdentity.user(userId: payload.userId, clientId: payload.clientId)
+                return .authenticated(Authenticated(identity: identity, viaLegacyJWE: true))
+            } catch {
+                logger.notice("Bearer token verification failed: \(type(of: error))")
+                return .rejected(Self.unauthorized("access token rejected."))
+            }
+        default:
+            logger.notice("Bearer token rejected: neither a signed access token nor a JWE")
+            return .rejected(Self.unauthorized("access token rejected."))
+        }
+    }
+
+    /// The subject the `operatorId` header must equal, verbatim; `nil` for callers without an operator.
+    private static func operatorSubject(of identity: CallerIdentity) -> String? {
+        switch identity {
+        case .user(let userId, _): userId
+        case .delegatedUser(let claims): claims.userId
+        case .application: nil
         }
     }
 

@@ -3,18 +3,12 @@ import Foundation
 @testable import Middleware
 import MiddlewareTesting
 
-private let ic = ApplicationTokenTestSigner(kid: "ic-1", issuer: "https://identity.test")
-private let oc = ApplicationTokenTestSigner(kid: "oc-1", issuer: "https://oidc.test")
 private let audience = "mendesky-services"
 
 private func verification(
     now: @escaping @Sendable () -> Date = { Date() }
 ) throws -> SignedAccessTokenVerification {
-    let trust = try AccessTokenTrust(audience: audience, issuers: [
-        ic.trustedIssuer(callerTypes: [.user]),
-        oc.trustedIssuer(callerTypes: [.application, .delegatedUser], actors: ["mendesky-mcp-server"]),
-    ])
-    return SignedAccessTokenVerification(trust: trust, now: now)
+    SignedAccessTokenVerification(trust: try icOcTrust(), now: now)
 }
 
 private func base64URL(_ string: String) -> String {

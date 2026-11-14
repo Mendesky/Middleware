@@ -4,8 +4,6 @@ import JSONWebKey
 @testable import Middleware
 import MiddlewareTesting
 
-private let ic = ApplicationTokenTestSigner(kid: "ic-1", issuer: "https://identity.test")
-private let oc = ApplicationTokenTestSigner(kid: "oc-1")
 private let audience = ApplicationTokenTestSigner.defaultAudience
 
 private func expectError(_ expected: AccessTokenTrustError, _ body: () throws -> Void) {
