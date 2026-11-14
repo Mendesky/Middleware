@@ -26,7 +26,7 @@ public struct TrustedIssuer: Sendable {
 }
 
 /// Startup configuration errors. Associated values are configuration values or variable names, never key material.
-public enum AccessTokenTrustError: Error, Equatable {
+public enum AccessTokenTrustError: Error, Equatable, CustomStringConvertible {
     case unreadable
     case missingAudience
     case noIssuers
@@ -45,6 +45,30 @@ public enum AccessTokenTrustError: Error, Equatable {
     case keyTooShort(kid: String)
     /// A pre-unification `MENDESKY_APP_TOKEN_*` variable is set; it is no longer read.
     case renamedVariable(String)
+
+    public var description: String {
+        switch self {
+        case .unreadable: "access token trust configuration is unreadable or malformed"
+        case .missingAudience: "access token trust configuration has no audience"
+        case .noIssuers: "access token trust configuration lists no issuers"
+        case .blankIssuer: "access token trust configuration has an issuer with a blank name"
+        case .duplicateIssuer(let issuer): "issuer \(issuer) is listed more than once"
+        case .noCallerTypes(let issuer): "issuer \(issuer) allows no caller types"
+        case .unknownCallerType(let type): "unknown caller type \(type)"
+        case .multipleUserIssuers: "more than one issuer is allowed to issue user tokens"
+        case .userIssuerAllowsOtherCallerTypes(let issuer):
+            "issuer \(issuer) may issue user tokens and so must allow no other caller type"
+        case .delegatedUserWithoutActors(let issuer): "issuer \(issuer) allows delegatedUser but lists no actors"
+        case .emptyKeySet(let issuer): "issuer \(issuer) has no keys"
+        case .keyWithoutKid(let issuer): "issuer \(issuer) has a key without a kid"
+        case .duplicateKid(let kid): "kid \(kid) appears more than once"
+        case .privateKeyMaterial(let kid): "key \(kid) contains private key material"
+        case .unsupportedKey(let kid): "key \(kid) is not an RSA key usable with RS256"
+        case .keyTooShort(let kid): "key \(kid) is shorter than 2048 bits"
+        case .renamedVariable(let name):
+            "\(name) is no longer read; use MENDESKY_ACCESS_TOKEN_TRUST or MENDESKY_ACCESS_TOKEN_TRUST_PATH"
+        }
+    }
 }
 
 /// Which issuers Middleware trusts for `at+jwt` access tokens, validated at construction so a bad configuration

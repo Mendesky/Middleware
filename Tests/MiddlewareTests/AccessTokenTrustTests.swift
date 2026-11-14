@@ -98,6 +98,13 @@ private func trustJSON(keys: [[String: Any]], callerTypes: [String] = ["applicat
         }
     }
 
+    @Test func renamedVariableDescriptionNamesTheReplacements() {
+        let text = String(describing: AccessTokenTrustError.renamedVariable("MENDESKY_APP_TOKEN_JWKS"))
+        #expect(text.contains("MENDESKY_APP_TOKEN_JWKS"))
+        #expect(text.contains("MENDESKY_ACCESS_TOKEN_TRUST_PATH"))
+        #expect(text.replacingOccurrences(of: "MENDESKY_ACCESS_TOKEN_TRUST_PATH", with: "").contains("MENDESKY_ACCESS_TOKEN_TRUST"))
+    }
+
     @Test func missingAudienceRefuses() {
         expectError(.missingAudience) { _ = try trust([oc.trustedIssuer(callerTypes: [.application])], audience: "  ") }
     }
