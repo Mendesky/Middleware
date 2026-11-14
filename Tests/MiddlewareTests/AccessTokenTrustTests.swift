@@ -272,6 +272,14 @@ private func trustJSON(keys: [[String: Any]], callerTypes: [String] = ["applicat
         }
     }
 
+    @Test func encryptionUseRefuses() throws {
+        var key = jwkObject(oc.publicKey)
+        key["use"] = "enc"
+        expectError(.unsupportedKey(kid: "oc-1")) { _ = try AccessTokenTrust(json: trustJSON(keys: [key])) }
+        key["use"] = "sig"
+        _ = try AccessTokenTrust(json: trustJSON(keys: [key]))
+    }
+
     @Test func standardExponentIsAccepted() throws {
         var key = jwkObject(oc.publicKey)
         key["e"] = "AQAB"

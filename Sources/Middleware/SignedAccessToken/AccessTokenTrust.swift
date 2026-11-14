@@ -184,7 +184,8 @@ public struct AccessTokenTrust: Sendable {
                     throw .privateKeyMaterial(kid: kid)
                 }
                 guard key.keyType == .rsa, let modulus = key.n, let exponent = key.e, Self.isUsableExponent(exponent),
-                      key.algorithm == nil || key.algorithm == "RS256"
+                      key.algorithm == nil || key.algorithm == "RS256",
+                      key.publicKeyUse == nil || key.publicKeyUse == .signature
                 else { throw .unsupportedKey(kid: kid) }
                 // Exact bit length: leading zero bytes add nothing, and a top byte below 0x80 leaves bits unused.
                 let significant = modulus.drop(while: { $0 == 0 })
