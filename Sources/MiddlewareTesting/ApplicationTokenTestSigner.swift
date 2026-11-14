@@ -26,7 +26,8 @@ public struct ApplicationTokenTestSigner: Sendable {
         self.publicKey = JWK(keyType: .rsa, algorithm: "RS256", keyID: kid, e: full.e, n: full.n)
     }
 
-    /// Base64 of a JWK Set JSON holding these signers' public keys (the `MENDESKY_APP_TOKEN_JWKS` format).
+    /// Base64 of a JWK Set JSON holding these signers' public keys (just the `keys` array of one issuer's trust entry,
+    /// not a full `MENDESKY_ACCESS_TOKEN_TRUST`; use `trustBase64(audience:issuers:)` for that).
     public static func keySetBase64(_ signers: [ApplicationTokenTestSigner]) -> String {
         struct Set: Encodable { let keys: [JWK] }
         // swiftlint:disable:next force_try

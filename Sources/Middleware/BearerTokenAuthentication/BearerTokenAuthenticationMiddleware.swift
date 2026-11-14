@@ -53,7 +53,7 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     }
 
     /// Reads the same environment as `init(validators:)` and opens the given routes to application and delegated
-    /// user tokens. Throws when the trust configuration is invalid (or uses a renamed `MENDESKY_APP_TOKEN_*` variable).
+    /// user tokens. Throws when the trust configuration is invalid (or any old pre-rename application-token variable is still set).
     public init(validators: [any WhitelistValidator] = [], accepting: [RouteAcceptance]) throws {
         try self.init(environment: ProcessInfo.processInfo.environment, validators: validators, accepting: accepting)
     }
@@ -63,7 +63,8 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         self.init(verification: verification, trust: nil, validators: validators)
     }
 
-    /// Also accepts application tokens on the routes for which `acceptsApplication` returns true.
+    /// Also accepts application tokens on the routes for which `acceptsApplication` returns true (older spelling of
+    /// `accepting: [.application(where:)]`; prefer `accepting:`).
     /// Trusted issuers come from `MENDESKY_ACCESS_TOKEN_TRUST` / `MENDESKY_ACCESS_TOKEN_TRUST_PATH`; when neither is
     /// set, every signed (3-segment) token is rejected. Same as `init(validators:accepting: [.application(where:)])`.
     public init(validators: [any WhitelistValidator] = [], acceptsApplication: @escaping @Sendable (Request) -> Bool) throws {
