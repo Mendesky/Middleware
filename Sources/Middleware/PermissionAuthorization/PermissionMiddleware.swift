@@ -5,7 +5,11 @@
 //  Endpoint-level authorization. For requests matching a configured path-rule it:
 //    1. takes the trusted userId from `Caller.current` (set by BearerTokenAuthenticationMiddleware
 //       when it runs in front of this middleware); only when `Caller.current` is nil does it fall
-//       back to self-decrypting the JWE (deprecated; removed together with JWE in a major version),
+//       back to self-decrypting the JWE (deprecated; removed together with JWE in a major version).
+//       The fallback honours `MENDESKY_LEGACY_JWE` like Bearer does: only a 5-segment token is a legacy
+//       JWE; in `reject` mode it is not decrypted (401, `legacy-jwe-rejected` log); otherwise a decrypted
+//       JWE is logged as `legacy-jwe-accepted` (warning level in `warn` mode). Logs never carry the
+//       token or the userId,
 //    2. fetches that user's *current* permissions live via a `PermissionsProvider`
 //       (e.g. an IAMContext getPermissions adapter),
 //    3. AND-checks them against the rule's required permissions.
@@ -27,6 +31,7 @@
 import Foundation
 import Hummingbird
 import HTTPTypes
+import Logging
 
 public struct PermissionMiddleware: MiddlewareProtocol {
     public typealias Input = Request
@@ -36,16 +41,40 @@ public struct PermissionMiddleware: MiddlewareProtocol {
     let rules: [PermissionRule]
     let provider: any PermissionsProvider
     let verification: AccessTokenVerification
+    let legacyJWE: LegacyJWEMode
+    let serviceName: String
+    let logger: Logger
 
-    public init(rules: [PermissionRule], provider: any PermissionsProvider, verification: AccessTokenVerification) {
+    /// - Parameters:
+    ///   - legacyJWE: how the JWE fallback treats legacy tokens. This initializer uses the value passed
+    ///     (default `.accept`) and ignores `MENDESKY_LEGACY_JWE`; only `init(rules:provider:)` reads it.
+    ///   - serviceName: reported in the legacy JWE counter log.
+    public init(
+        rules: [PermissionRule],
+        provider: any PermissionsProvider,
+        verification: AccessTokenVerification,
+        legacyJWE: LegacyJWEMode = .accept,
+        serviceName: String = ProcessInfo.processInfo.processName,
+        logger: Logger = Logger(label: "Middleware.PermissionMiddleware")
+    ) {
         self.rules = rules
         self.provider = provider
         self.verification = verification
+        self.legacyJWE = legacyJWE
+        self.serviceName = serviceName
+        self.logger = logger
     }
 
-    /// Loads the token-verification keys from the standard `MENDESKY_AUTH_*` environment variables.
+    /// Reads the legacy JWE mode from `MENDESKY_LEGACY_JWE`, then loads the token-verification keys from the
+    /// standard `MENDESKY_AUTH_*` environment variables; any invalid setting throws.
     public init(rules: [PermissionRule], provider: any PermissionsProvider) throws {
-        self.init(rules: rules, provider: provider, verification: try .fromEnvironment())
+        try self.init(rules: rules, provider: provider, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// `MENDESKY_LEGACY_JWE` comes from `environment`; the `MENDESKY_AUTH_*` keys from the process environment.
+    init(rules: [PermissionRule], provider: any PermissionsProvider, environment: [String: String]) throws {
+        let legacyJWE = try LegacyJWEMode.fromEnvironment(environment)
+        self.init(rules: rules, provider: provider, verification: try .fromEnvironment(), legacyJWE: legacyJWE)
     }
 
     public func handle(_ input: Request, context: BasicRequestContext, next: (Request, BasicRequestContext) async throws -> Response) async throws -> Response {
@@ -60,7 +89,7 @@ public struct PermissionMiddleware: MiddlewareProtocol {
             return try await next(input, context)
         }
 
-        guard let userId = trustedUserId(from: input) else {
+        guard let userId = trustedUserId(from: input, context: context) else {
             return Response(status: .unauthorized)
         }
 
@@ -81,7 +110,7 @@ public struct PermissionMiddleware: MiddlewareProtocol {
         return try await next(input, context)
     }
 
-    private func trustedUserId(from request: Request) -> String? {
+    private func trustedUserId(from request: Request, context: BasicRequestContext) -> String? {
         switch Caller.current {
         case .user(let userId, _):
             return userId
@@ -91,17 +120,28 @@ public struct PermissionMiddleware: MiddlewareProtocol {
             // An application caller has no IAM user.
             return nil
         case nil:
-            return legacyTrustedUserId(from: request)
+            return legacyTrustedUserId(from: request, context: context)
         }
     }
 
     /// Deprecated fallback for when no BearerTokenAuthenticationMiddleware runs in front: decrypt the JWE
-    /// ourselves. Removed together with JWE support in a major version.
-    private func legacyTrustedUserId(from request: Request) -> String? {
+    /// ourselves, subject to `MENDESKY_LEGACY_JWE`. Removed together with JWE support in a major version.
+    private func legacyTrustedUserId(from request: Request, context: BasicRequestContext) -> String? {
         guard let authorization = request.headers.first(where: { $0.name == .authorization }),
-              let token = AccessTokenVerification.bearerToken(fromHeaderValue: authorization.value),
-              let payload = try? verification.decrypt(compactString: token) else {
+              let token = AccessTokenVerification.bearerToken(fromHeaderValue: authorization.value)
+        else { return nil }
+        let route = context.endpointPath ?? "unknown"
+        // Only a 5-segment token is a legacy JWE; anything else fails the decrypt below as before.
+        let isJWE = token.split(separator: ".", omittingEmptySubsequences: false).count == 5
+        if isJWE, legacyJWE == .reject {
+            logger.notice("legacy-jwe-rejected", metadata: ["route": .string(route), "service": .string(serviceName)])
             return nil
+        }
+        guard let payload = try? verification.decrypt(compactString: token) else { return nil }
+        if isJWE {
+            logger.log(level: legacyJWE == .warn ? .warning : .notice, "legacy-jwe-accepted", metadata: [
+                "clientId": .string(payload.clientId), "route": .string(route), "service": .string(serviceName),
+            ])
         }
         return payload.userId
     }

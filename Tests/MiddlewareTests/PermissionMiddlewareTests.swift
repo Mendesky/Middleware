@@ -330,3 +330,80 @@ private func makeChainApp(
         #expect(await recorder.userIds == ["u1"])
     }
 }
+
+// MARK: - Legacy JWE fallback honours MENDESKY_LEGACY_JWE
+
+private func makeLegacyApp(mode: LegacyJWEMode, logger: Logger, recorder: UserIdRecorder) throws -> some ApplicationProtocol {
+    let router = Router()
+    router.add(middleware: PermissionMiddleware(
+        rules: [try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])],
+        provider: recordingProvider(recorder, returning: ["business:read"]),
+        verification: makeVerification(),
+        legacyJWE: mode,
+        serviceName: "TestService",
+        logger: logger
+    ))
+    router.get("quotations/:id") { _, _ in "ok" }
+    return Application(router: router)
+}
+
+private func logLines(_ store: CapturingLogHandler.Store, containing text: String) -> [String] {
+    store.all.split(separator: "\n").map(String.init).filter { $0.contains(text) }
+}
+
+@Suite struct PermissionMiddlewareLegacyJWETests {
+    @Test func rejectModeRefusesJWEWithoutDecryptingOrCallingProvider() async throws {
+        let (logger, store) = CapturingLogHandler.logger()
+        let recorder = UserIdRecorder()
+        let app = try makeLegacyApp(mode: .reject, logger: logger, recorder: recorder)
+        let token = try jweUserToken(userId: "u1")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: bearer(token))
+            #expect(res.status == .unauthorized)
+        }
+        #expect(await recorder.userIds.isEmpty)
+        let rejected = logLines(store, containing: "legacy-jwe-rejected")
+        #expect(rejected.count == 1)
+        let line = try #require(rejected.first)
+        #expect(line.hasPrefix("notice") && line.contains("{id}") && line.contains("TestService"))
+        #expect(!store.all.contains(token) && !store.all.contains("u1"))
+        #expect(logLines(store, containing: "legacy-jwe-accepted").isEmpty)
+    }
+
+    @Test func acceptModeLogsAcceptedWithoutTokenOrUserId() async throws {
+        let (logger, store) = CapturingLogHandler.logger()
+        let recorder = UserIdRecorder()
+        let app = try makeLegacyApp(mode: .accept, logger: logger, recorder: recorder)
+        let token = try jweUserToken(userId: "u1")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: bearer(token))
+            #expect(res.status == .ok)
+        }
+        #expect(await recorder.userIds == ["u1"])
+        let accepted = logLines(store, containing: "legacy-jwe-accepted")
+        #expect(accepted.count == 1)
+        let line = try #require(accepted.first)
+        #expect(line.hasPrefix("notice") && line.contains("{id}") && line.contains("TestService"))
+        let keys = line.matches(of: /"(\w+)":/).map { String($0.output.1) }
+        #expect(Set(keys) == ["clientId", "route", "service"] && keys.count == 3)
+        #expect(!store.all.contains(token) && !store.all.contains("u1") && !store.all.contains("/quotations/1"))
+    }
+
+    @Test func warnModeLogsAtWarning() async throws {
+        let (logger, store) = CapturingLogHandler.logger()
+        let app = try makeLegacyApp(mode: .warn, logger: logger, recorder: UserIdRecorder())
+        let token = try jweUserToken(userId: "u1")
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: bearer(token))
+            #expect(res.status == .ok)
+        }
+        let line = try #require(logLines(store, containing: "legacy-jwe-accepted").first)
+        #expect(line.hasPrefix("warning"))
+    }
+
+    @Test func invalidModeInEnvironmentRefusesToStart() {
+        #expect(throws: LegacyJWEModeError(value: "off")) {
+            try PermissionMiddleware(rules: [], provider: providerReturning([]), environment: ["MENDESKY_LEGACY_JWE": "off"])
+        }
+    }
+}
