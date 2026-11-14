@@ -44,9 +44,13 @@ public struct SignedAccessTokenVerification: Sendable {
         else { throw .malformed }
 
         // Parsers disagree on duplicate keys (first vs last wins), so a header naming `"alg"` twice is refused outright.
-        guard String(decoding: headerData, as: UTF8.self).components(separatedBy: "\"alg\"").count <= 2 else {
-            throw .malformed
-        }
+        // A JSON escape could spell a second `alg` without the literal text (`"\u0061lg"`), so backslashes are refused
+        // too. The one exception is `\/`: Foundation's JSON writers emit `application/at+jwt` as `application\/at+jwt`,
+        // and `/` cannot spell `alg`. (Removing `\/` pairs leaves a stray backslash from `\\/`, which is refused.)
+        let rawHeader = String(decoding: headerData, as: UTF8.self)
+        guard !rawHeader.replacingOccurrences(of: "\\/", with: "").contains("\\"),
+              rawHeader.components(separatedBy: "\"alg\"").count <= 2
+        else { throw .malformed }
         // Header checks come first, so e.g. an `alg: none` token never reaches signature verification.
         guard header["alg"] as? String == "RS256" else { throw .unsupportedAlgorithm }
         guard let typ = (header["typ"] as? String)?.lowercased(),
@@ -130,9 +134,22 @@ public struct SignedAccessTokenVerification: Sendable {
     }
 }
 
-/// Decodes unpadded base64url (RFC 7515 §2).
+/// Decodes unpadded base64url (RFC 7515 §2), strictly: only `[A-Za-z0-9_-]`, no `=` padding, and only the canonical
+/// spelling (unused trailing bits zero), so one signed token has exactly one accepted string form.
 func base64URLDecode(_ value: Substring) -> Data? {
-    var s = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-    while s.count % 4 != 0 { s += "=" }
-    return Data(base64Encoded: s)
+    let isBase64URL: (UInt8) -> Bool = {
+        (0x41...0x5A).contains($0) || (0x61...0x7A).contains($0) || (0x30...0x39).contains($0)  // A-Z a-z 0-9
+            || $0 == 0x2D || $0 == 0x5F  // - _
+    }
+    guard value.utf8.allSatisfy(isBase64URL), value.utf8.count % 4 != 1 else { return nil }
+    var padded = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+    padded += String(repeating: "=", count: (4 - padded.utf8.count % 4) % 4)
+    guard let data = Data(base64Encoded: padded), base64URLEncode(data) == value else { return nil }
+    return data
+}
+
+private func base64URLEncode(_ data: Data) -> String {
+    data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
 }

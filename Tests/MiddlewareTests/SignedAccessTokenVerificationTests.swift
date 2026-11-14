@@ -35,15 +35,6 @@ private func expectError(
     }
 }
 
-private func expectRejected(
-    _ v: SignedAccessTokenVerification, _ token: String, sourceLocation: SourceLocation = #_sourceLocation
-) {
-    do {
-        let identity = try v.verify(compactString: token)
-        Issue.record("token was accepted as \(identity)", sourceLocation: sourceLocation)
-    } catch {}
-}
-
 /// Claims an OIDCContext application token would carry, for hand-built tokens.
 private func claimsJSON(exp: Int = 99999999999, extra: String = "") -> String {
     #"{"iss":"https://oidc.test","aud":["\#(audience)"],"sub":"x","sub_type":"application","client_id":"c","scope":"*","exp":\#(exp)\#(extra)}"#
@@ -157,28 +148,47 @@ private func claimsJSON(exp: Int = 99999999999, extra: String = "") -> String {
         let v = try verification()
         let header = base64URL(#"{"alg":"none","typ":"at+jwt","kid":"oc-1","alg":"RS256"}"#)
         let payload = base64URL(claimsJSON())
-        expectRejected(v, "\(header).\(payload).")
-        expectRejected(v, "\(header).\(payload).AAAA")
+        expectError(.malformed, v, "\(header).\(payload).")
+        expectError(.malformed, v, "\(header).\(payload).AAAA")
     }
 
     @Test func rejectsDuplicateAlgRS256FirstUnsigned() throws {
         let v = try verification()
         let header = base64URL(#"{"alg":"RS256","typ":"at+jwt","kid":"oc-1","alg":"none"}"#)
         let payload = base64URL(claimsJSON())
-        expectRejected(v, "\(header).\(payload).")
-        expectRejected(v, "\(header).\(payload).AAAA")
+        expectError(.malformed, v, "\(header).\(payload).")
+        expectError(.malformed, v, "\(header).\(payload).AAAA")
     }
 
     @Test func rejectsDuplicateAlgRS256FirstEvenWhenSigned() throws {
         let token = oc.rawToken(
             headerJSON: #"{"alg":"RS256","typ":"at+jwt","kid":"oc-1","alg":"none"}"#, payloadJSON: claimsJSON())
-        expectRejected(try verification(), token)
+        expectError(.malformed, try verification(), token)
     }
 
     @Test func rejectsDuplicateAlgNoneFirstEvenWhenSigned() throws {
         let token = oc.rawToken(
             headerJSON: #"{"alg":"none","typ":"at+jwt","kid":"oc-1","alg":"RS256"}"#, payloadJSON: claimsJSON())
-        expectRejected(try verification(), token)
+        expectError(.malformed, try verification(), token)
+    }
+
+    /// A JSON escape spells a second `alg` without a second literal `"alg"`.
+    @Test func rejectsDuplicateAlgSpelledWithAnEscape() throws {
+        let v = try verification()
+        func signed(_ header: String) -> String { oc.rawToken(headerJSON: header, payloadJSON: claimsJSON()) }
+        expectError(.malformed, v, signed(#"{"alg":"none","\u0061lg":"RS256"}"#))
+        expectError(.malformed, v, signed(#"{"alg":"RS256","typ":"at+jwt","kid":"oc-1","\u0061lg":"none"}"#))
+        // Any other escape is refused as well, even a harmless one.
+        expectError(.malformed, v, signed(#"{"alg":"RS256","typ":"at+jw\u0074","kid":"oc-1"}"#))
+        expectError(.malformed, v, signed(#"{"alg":"RS256","typ":"at+jwt","kid":"oc-1","x":"\\/"}"#))
+    }
+
+    /// Foundation writes `/` as `\/`, so `application/at+jwt` arrives escaped; that escape alone is allowed.
+    @Test func acceptsEscapedSlashInType() throws {
+        let token = oc.rawToken(
+            headerJSON: #"{"alg":"RS256","typ":"application\/at+jwt","kid":"oc-1"}"#, payloadJSON: claimsJSON())
+        let id = try verification().verify(compactString: token)
+        guard case .application = id else { Issue.record("not application: \(id)"); return }
     }
 
     @Test func rejectsHS256() throws {
@@ -224,6 +234,49 @@ private func claimsJSON(exp: Int = 99999999999, extra: String = "") -> String {
     @Test func rejectsAnotherKeysSignature() throws {
         let impostor = ApplicationTokenTestSigner(kid: "oc-1", issuer: "https://oidc.test")
         expectError(.badSignature, try verification(), impostor.token(sub: "app-1"))
+    }
+
+    /// Nothing but `iss` is read before the signature verifies: a forged token that is also expired, for another
+    /// audience, and of an unknown subject type fails on its signature, not on any of those claims.
+    @Test func signatureIsCheckedBeforeAnyOtherClaim() throws {
+        let impostor = ApplicationTokenTestSigner(kid: "oc-1", issuer: "https://oidc.test")
+        let forged = impostor.token(sub: "app-1", audience: ["other"], expiresIn: -3600, subType: "robot")
+        expectError(.badSignature, try verification(), forged)
+    }
+
+    // MARK: Encoding
+
+    /// An RSA-2048 signature is 256 bytes, so its last base64url character carries 4 unused bits; flipping one gives a
+    /// string that lenient decoders map to the same bytes.
+    @Test func rejectsNonCanonicalTrailingBits() throws {
+        let v = try verification()
+        let token = oc.token(sub: "app-1")
+        #expect(throws: Never.self) { try v.verify(compactString: token) }
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+        let lastCharacter = try #require(token.last)
+        let last = try #require(alphabet.firstIndex(of: lastCharacter))
+        let variant = String(token.dropLast()) + String(alphabet[last ^ 1])
+        expectError(.malformed, v, variant)
+    }
+
+    @Test func rejectsStandardBase64AndPadding() throws {
+        let v = try verification()
+        // Find a token whose signature spells both `-` and `_`, so its standard-base64 form differs in both.
+        let token = try #require((0..<50).lazy.map { _ in oc.token(sub: "app-1") }.first {
+            let signature = $0.split(separator: ".")[2]
+            return signature.contains("-") && signature.contains("_")
+        })
+        expectError(.malformed, v, token.replacingOccurrences(of: "-", with: "+"))
+        expectError(.malformed, v, token.replacingOccurrences(of: "_", with: "/"))
+        // 256 bytes encode to 342 characters; standard base64 pads that with `==`.
+        expectError(.malformed, v, token + "==")
+    }
+
+    @Test func rejectsImpossibleSegmentLength() throws {
+        let token = oc.token(sub: "app-1")
+        let parts = token.split(separator: ".")
+        // Five characters cannot be a base64url encoding (length % 4 == 1).
+        expectError(.malformed, try verification(), "\(parts[0]).\(parts[1]).AAAAA")
     }
 
     // MARK: Claims

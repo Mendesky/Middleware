@@ -1,8 +1,6 @@
 import Foundation
 import _CryptoExtras
-import JSONWebAlgorithms
 import JSONWebKey
-import JSONWebSignature
 import Middleware
 
 /// Mints RS256 `at+jwt` application tokens for tests, the way OIDCContext would.
@@ -13,7 +11,7 @@ public struct ApplicationTokenTestSigner: Sendable {
 
     private let kid: String
     private let issuer: String
-    private let privateJWK: JWK
+    private let privateKey: _RSA.Signing.PrivateKey
     public let publicKey: JWK
 
     public init(kid: String = "app-test-1", issuer: String = defaultIssuer) {
@@ -21,14 +19,10 @@ public struct ApplicationTokenTestSigner: Sendable {
         self.issuer = issuer
         // swiftlint:disable:next force_try
         let key = try! _RSA.Signing.PrivateKey(keySize: .bits2048)
-        // jose-swift parses the PKCS#8 PEM into a JWK carrying the private parts.
+        self.privateKey = key
+        // jose-swift parses the PKCS#8 PEM into a JWK; only its public n/e are kept.
         // swiftlint:disable:next force_try
-        var full = try! JWK(pem: key.pkcs8PEMRepresentation)
-        full.keyID = kid
-        full.algorithm = "RS256"
-        // p/q are dropped: jose-swift rejects the primes it parsed itself; n/e/d sign fine.
-        full.p = nil; full.q = nil; full.dp = nil; full.dq = nil; full.qi = nil
-        self.privateJWK = full
+        let full = try! JWK(pem: key.pkcs8PEMRepresentation)
         self.publicKey = JWK(keyType: .rsa, algorithm: "RS256", keyID: kid, e: full.e, n: full.n)
     }
 
@@ -113,26 +107,31 @@ public struct ApplicationTokenTestSigner: Sendable {
         if let act { claims["act"] = act }
 
         // swiftlint:disable:next force_try
-        let jws = try! JWS(
-            payload: JSONSerialization.data(withJSONObject: claims),
-            protectedHeaderData: JSONSerialization.data(withJSONObject: header),
-            key: privateJWK
-        )
-        return jws.compactSerialization
+        let headerData = try! JSONSerialization.data(withJSONObject: header)
+        // swiftlint:disable:next force_try
+        let payloadData = try! JSONSerialization.data(withJSONObject: claims)
+        return signed(header: headerData, payload: payloadData)
     }
 
     /// Signs `<base64url(headerJSON)>.<base64url(payloadJSON)>` with this signer's key (RS256) without any header
     /// validation, so tests can craft hostile headers (duplicate `alg`, odd `typ`, ...).
     public func rawToken(headerJSON: String, payloadJSON: String) -> String {
-        func b64(_ data: Data) -> String {
-            data.base64EncodedString()
-                .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
-                .replacingOccurrences(of: "=", with: "")
-        }
-        let input = "\(b64(Data(headerJSON.utf8))).\(b64(Data(payloadJSON.utf8)))"
+        signed(header: Data(headerJSON.utf8), payload: Data(payloadJSON.utf8))
+    }
+
+    /// Compact RS256 JWS over the given header and payload bytes. Signs with the BoringSSL-backed `_RSA` key
+    /// (RSASSA-PKCS1-v1_5 over SHA-256, i.e. RS256): jose-swift's pure-Swift RS256 signer is far too slow for tests.
+    private func signed(header: Data, payload: Data) -> String {
+        let input = "\(Self.base64URL(header)).\(Self.base64URL(payload))"
         // swiftlint:disable:next force_try
-        let signature = try! SigningAlgorithm.RS256.cryptoSigner!.sign(data: Data(input.utf8), key: privateJWK)
-        return "\(input).\(b64(signature))"
+        let signature = try! privateKey.signature(for: Data(input.utf8), padding: .insecurePKCS1v1_5)
+        return "\(input).\(Self.base64URL(signature.rawRepresentation))"
+    }
+
+    private static func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
 
