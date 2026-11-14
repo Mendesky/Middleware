@@ -54,7 +54,8 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     /// Application keys come from `MENDESKY_APP_TOKEN_JWKS` / `_JWKS_PATH`; when unset, application tokens are always rejected.
     public init(validators: [any WhitelistValidator] = [], acceptsApplication: @escaping @Sendable (Request) -> Bool) throws {
         self.verification = try AccessTokenVerification.fromEnvironment()
-        self.applicationTokens = try ApplicationTokenVerification.fromEnvironment()
+        // TODO(Task 4): `ApplicationTokenVerification.fromEnvironment` is gone; this init is rewritten onto `AccessTokenTrust`.
+        self.applicationTokens = nil
         self.acceptsApplication = acceptsApplication
         self.validators = validators
         self.logger = Self.defaultLogger

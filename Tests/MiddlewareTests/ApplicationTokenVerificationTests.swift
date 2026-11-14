@@ -146,16 +146,6 @@ private func expectError(_ expected: ApplicationTokenError, _ v: ApplicationToke
         }
     }
 
-    @Test func fromEnvironmentTrimsIssuerAndAudience() throws {
-        let signer = ApplicationTokenTestSigner()
-        let v = try #require(try ApplicationTokenVerification.fromEnvironment([
-            "MENDESKY_APP_TOKEN_JWKS": ApplicationTokenTestSigner.keySetBase64([signer]),
-            "MENDESKY_APP_TOKEN_ISSUER": issuer + "\n",
-            "MENDESKY_APP_TOKEN_AUDIENCE": " " + audience + "\n",
-        ]))
-        #expect(throws: Never.self) { try v.verify(compactString: signer.token(sub: appId)) }
-    }
-
     @Test func rejectsFiveSegmentJWE() throws {
         expectError(.malformed, try verification([ApplicationTokenTestSigner()]), "a.b.c.d.e")
     }
@@ -221,39 +211,42 @@ private func expectError(_ expected: ApplicationTokenError, _ v: ApplicationToke
         }
     }
 
-    @Test func fromEnvironmentIsNilWithoutKeys() throws {
-        #expect(try ApplicationTokenVerification.fromEnvironment([:]) == nil)
+    @Test func rejectsUserSubType() throws {
+        let signer = ApplicationTokenTestSigner()
+        expectError(.wrongType, try verification([signer]), signer.token(sub: appId, subType: "user"))
     }
 
-    @Test func fromEnvironmentThrowsWithoutIssuerOrAudience() throws {
-        let jwks = ApplicationTokenTestSigner.keySetBase64([ApplicationTokenTestSigner()])
+    @Test func rejectsDelegatedShape() throws {
+        let signer = ApplicationTokenTestSigner()
+        let token = signer.token(sub: appId, subType: "user", actors: ["mendesky-mcp-server"])
+        expectError(.wrongType, try verification([signer]), token)
+    }
+
+    @Test func rejectsMissingSubType() throws {
+        let signer = ApplicationTokenTestSigner()
+        expectError(.missingClaim("sub_type"), try verification([signer]), signer.token(sub: appId, subType: nil))
+    }
+
+    @Test func shortOrPrivateKeyIsAConfigurationError() throws {
+        var short = ApplicationTokenTestSigner().publicKey
+        short.n = Data(repeating: 0xAB, count: 128)
+        #expect(throws: ApplicationTokenConfigurationError.unsupportedKey) {
+            try ApplicationTokenVerification(publicKeys: [short], issuer: issuer, audience: audience)
+        }
+        var withPrivate = ApplicationTokenTestSigner().publicKey
+        withPrivate.d = Data(repeating: 0x01, count: 256)
+        #expect(throws: ApplicationTokenConfigurationError.unsupportedKey) {
+            try ApplicationTokenVerification(publicKeys: [withPrivate], issuer: issuer, audience: audience)
+        }
+    }
+
+    @Test func blankIssuerOrAudienceIsAConfigurationError() {
+        let key = ApplicationTokenTestSigner().publicKey
         #expect(throws: ApplicationTokenConfigurationError.missingIssuer) {
-            try ApplicationTokenVerification.fromEnvironment(["MENDESKY_APP_TOKEN_JWKS": jwks])
+            try ApplicationTokenVerification(publicKeys: [key], issuer: " ", audience: audience)
         }
         #expect(throws: ApplicationTokenConfigurationError.missingAudience) {
-            try ApplicationTokenVerification.fromEnvironment(
-                ["MENDESKY_APP_TOKEN_JWKS": jwks, "MENDESKY_APP_TOKEN_ISSUER": issuer])
-        }
-    }
-
-    @Test func fromEnvironmentLoadsFromBase64AndFile() throws {
-        let signer = ApplicationTokenTestSigner()
-        let jwks = ApplicationTokenTestSigner.keySetBase64([signer])
-        let base = ["MENDESKY_APP_TOKEN_ISSUER": issuer, "MENDESKY_APP_TOKEN_AUDIENCE": audience]
-
-        let fromBase64 = try #require(try ApplicationTokenVerification.fromEnvironment(base.merging(["MENDESKY_APP_TOKEN_JWKS": jwks]) { $1 }))
-        #expect(throws: Never.self) { try fromBase64.verify(compactString: signer.token(sub: appId)) }
-
-        let path = FileManager.default.temporaryDirectory.appending(path: "jwks-\(UUID().uuidString).json")
-        try Data(base64Encoded: jwks)!.write(to: path)
-        defer { try? FileManager.default.removeItem(at: path) }
-        let fromFile = try #require(try ApplicationTokenVerification.fromEnvironment(base.merging(["MENDESKY_APP_TOKEN_JWKS_PATH": path.path()]) { $1 }))
-        #expect(throws: Never.self) { try fromFile.verify(compactString: signer.token(sub: appId)) }
-    }
-
-    @Test func fromEnvironmentReportsUnreadableKeySet() {
-        #expect(throws: ApplicationTokenConfigurationError.keySetUnreadable) {
-            try ApplicationTokenVerification.fromEnvironment(["MENDESKY_APP_TOKEN_JWKS_PATH": "/nonexistent/jwks.json"])
+            try ApplicationTokenVerification(publicKeys: [key], issuer: issuer, audience: "")
         }
     }
 
