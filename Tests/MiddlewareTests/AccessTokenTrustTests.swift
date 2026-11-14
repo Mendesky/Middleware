@@ -195,6 +195,25 @@ private func trustJSON(keys: [[String: Any]], callerTypes: [String] = ["applicat
         }
     }
 
+    /// 256 bytes is not 2048 bits when the top byte is below 0x80: the exact modulus bit length counts.
+    @Test func modulusBitLengthIsExact() {
+        func key(topByte: UInt8) -> JWK {
+            JWK(
+                keyType: .rsa, algorithm: "RS256", keyID: "edge",
+                e: Data([1, 0, 1]), n: Data([topByte]) + Data(repeating: 0xC1, count: 255)
+            )
+        }
+        for topByte: UInt8 in [0x01, 0x7F] {
+            expectError(.keyTooShort(kid: "edge")) {
+                _ = try trust([TrustedIssuer(issuer: "https://oidc.test", callerTypes: [.application], publicKeys: [key(topByte: topByte)])])
+            }
+        }
+        // 2048 bits exactly (top bit set) is accepted.
+        #expect(throws: Never.self) {
+            _ = try trust([TrustedIssuer(issuer: "https://oidc.test", callerTypes: [.application], publicKeys: [key(topByte: 0x80)])])
+        }
+    }
+
     @Test func nonRSAOrOtherAlgRefuses() throws {
         let ec = JWK(keyType: .ellipticCurve, keyID: "ec", x: Data(repeating: 1, count: 32), y: Data(repeating: 2, count: 32))
         expectError(.unsupportedKey(kid: "ec")) {

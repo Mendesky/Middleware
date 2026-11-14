@@ -186,8 +186,11 @@ public struct AccessTokenTrust: Sendable {
                 guard key.keyType == .rsa, let modulus = key.n, let exponent = key.e, Self.isUsableExponent(exponent),
                       key.algorithm == nil || key.algorithm == "RS256"
                 else { throw .unsupportedKey(kid: kid) }
-                // Leading zero bytes do not add bits.
-                guard modulus.drop(while: { $0 == 0 }).count * 8 >= 2048 else { throw .keyTooShort(kid: kid) }
+                // Exact bit length: leading zero bytes add nothing, and a top byte below 0x80 leaves bits unused.
+                let significant = modulus.drop(while: { $0 == 0 })
+                guard let top = significant.first,
+                      (significant.count - 1) * 8 + (8 - top.leadingZeroBitCount) >= 2048
+                else { throw .keyTooShort(kid: kid) }
                 guard byKid[kid] == nil else { throw .duplicateKid(kid) }
                 byKid[kid] = (name, key)
             }
