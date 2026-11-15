@@ -51,7 +51,7 @@ swift test
 
 ## 認證：`BearerTokenAuthenticationMiddleware`
 
-驗證 `Authorization: Bearer <token>`：token 是 JWE（legacy，5 段）或 at+jwt（3 段，見下方）；並比對 `operatorId` header（`userId` 為 deprecated fallback）防盜用。
+驗證 `Authorization: Bearer <token>`：token 是 JWE（legacy，5 段）或 at+jwt（3 段，見下方）；並比對 `operatorId`（`userId` 為 deprecated fallback）與 `applicationId` header 防盜用（見下方「呼叫者 header」）。
 
 金鑰從環境變數載入：
 
@@ -71,8 +71,6 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 
 行為與 status code：
 
-> ⚠️ **在開放給 `.application` 的路由上，`operatorId` / `userId` header 不會被驗證，會原封不動傳到 handler。** handler 不可信任它們來辨識 application 呼叫者；請讀 `Caller.current`（`if case .application(let c) = Caller.current`）。 `ProxyHeaderReceiverMiddleware` 不論是否通過驗證都會收下該 header，`ProxyHeaderSenderMiddleware` 會把它轉發到每一次下游呼叫，所以呼叫者自行指定的 `operatorId` 會連同 application token 一路傳到下游服務；下游若把 `operatorId` 記進事件，該行為就會被歸給呼叫者指定的人。
-
 | 情況 | 回應 |
 |---|---|
 | OPTIONS / 白名單路徑 | 放行（跳過）|
@@ -81,9 +79,26 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | JWE 解密失敗 / token 過期 | `401` |
 | JWE：沒帶 `operatorId`（或 deprecated 的 `userId`）header | `400` |
 | JWE：`operatorId` / `userId` header ≠ token 內 userId | `400`（防盜用）|
+| JWE：`applicationId` header 有帶但 ≠ `mendesky-first-party`，或重複 | `400` |
+| JWE：沒帶 `applicationId` | 放行，傳下去的請求補上 `applicationId: mendesky-first-party` |
 | 驗證本身出錯（token 驗證流程的非預期錯誤）| `401` |
 
 > 白名單用 `PathValidator`（見下方），符合的路徑會跳過認證；`OPTIONS` 一律跳過（給 CORS preflight）。
+
+### 呼叫者 header：`operatorId` 與 `applicationId`
+
+通過路由開放檢查後，Middleware 依身分比對兩個 header（名稱見 `CallerHeaders`），**精確、區分大小寫**，比對對象就是 `Caller.current` 裡的值；缺少、不符或重複都回 `400`：
+
+| 身分 | `operatorId` | `applicationId` |
+|---|---|---|
+| `.user`（JWE 或 at+jwt）| 必帶，= token 內 userId（`sub`），原樣比對 | 選帶。沒帶時 Middleware 在傳給下一層的請求補上 `applicationId: mendesky-first-party`（`CallerHeaders.firstPartyApplicationId`）；有帶則必須剛好是它 |
+| `.delegatedUser` | 必帶，= `sub` | 必帶，= actor（`act.sub`，例如 `mendesky-mcp-server`）|
+| `.application` | 必帶，= applicationId | 必帶，= applicationId |
+
+- `operatorId` 缺少時才讀 deprecated 的 `userId` header；`userId` **永遠不能**代替 `applicationId`。
+- `.application` 的 applicationId 是 token `sub` 轉小寫後的值，header 必須帶小寫（帶大寫 UUID 會 `400`），所以 handler 從 header 讀到的值一定等於 `Caller.current`。
+- `.application` 的 `operatorId` 目前等於 applicationId；之後會改為該 application 綁定的 service account。
+- 白名單路徑與 `OPTIONS` 不檢查、也不補 header。
 
 ### Signed access token（at+jwt）
 
@@ -160,7 +175,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 ```
 
 - 第一方 user（JWE 或 at+jwt）不需要開放，所有路由都收。
-- ⚠️ **在開放給 `.application` 的路由上，`operatorId` / `userId` header 不會被驗證，會原封不動傳到 handler。** application 呼叫者沒有使用者，handler 不可信任這些 header；請讀 `Caller.current`（`if case .application(let c) = Caller.current`）取得呼叫者。 `ProxyHeaderReceiverMiddleware` 不論是否通過驗證都會收下該 header，`ProxyHeaderSenderMiddleware` 會把它轉發到每一次下游呼叫，所以呼叫者自行指定的 `operatorId` 會連同 application token 一路傳到下游服務；下游若把 `operatorId` 記進事件，該行為就會被歸給呼叫者指定的人。
+- `.application` 與 `.delegatedUser` 都必須帶 `operatorId` 與 `applicationId`，規則見上方「呼叫者 header」。
 - 同一條路由符合多個 `RouteAcceptance` 時是**聯集（OR）**：只要任一條放行就放行。之後再加一條較寬的規則（例如不限 actor），會靜默放寬原本有 actor 限定的那條。
 - 舊的 `BearerTokenAuthenticationMiddleware(acceptsApplication:)` 仍可用，等同 `accepting: [.application(where:)]`。
 - `.delegatedUser` 的 `actors: nil` 表示接受該發行者信任清單內的任何 actor；`requiresScope` 用精確比對，**不適用 `*`**，且代理 token 的任一 scope 項目只要含 `*` 字元（例如 `*`、`quote:*`）一律拒絕。
@@ -175,7 +190,10 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | 路由沒開放該身分（或 actor 不符路由限定）| `401` |
 | `.delegatedUser`：路由開放且 actor 符合，但 scope 不含 `requiresScope` | `403`（body `insufficient scope.`）|
 | `.user` 與 `.delegatedUser`：沒帶 `operatorId` 或 ≠ `sub` | `400`（`userId` header 為 deprecated fallback）|
-| `.application` | 不需要 `operatorId`；若有帶也**不驗證**，原樣傳給 handler（見上方警告）|
+| `.application`：沒帶 `operatorId` 或 ≠ applicationId（小寫）| `400`（`userId` header 為 deprecated fallback）|
+| `.delegatedUser`：沒帶 `applicationId` 或 ≠ actor（`act.sub`）| `400` |
+| `.application`：沒帶 `applicationId` 或 ≠ applicationId（小寫）| `400` |
+| `.user`：`applicationId` 有帶但 ≠ `mendesky-first-party`；或任何身分帶了重複的 `applicationId` | `400` |
 | 5 段 token 且 `MENDESKY_LEGACY_JWE=reject` | `401` |
 
 驗證只收 RS256（固定演算法、不從 token 取），header 必須剛好是 `{alg, typ, kid}`（多帶 `crit`、`jwk` 等參數一律拒收），並檢查 `typ`、`kid`、簽章、`iss`、`aud`、`exp`，且 `sub`、`sub_type`、`client_id`、`scope` 必須存在；失敗的原因記在 log，**絕不記 token**。
@@ -300,18 +318,16 @@ try api.registerHandlers(on: router, serverURL: URL(string: "/opportunity-contex
 ### 一次請求的流向
 
 ```
-前端 ──HTTP──▶ CORS ─▶ BearerTokenAuth（驗證 JWE/at+jwt、驗 operatorId、設定 Caller.current）─▶ PermissionMiddleware ─▶ handler
-                                                              │ 1. method/path 比對 rules → 算出本請求所需權限
-                                                              │ 2. 讀 Caller.current 拿 userId（沒有時才退回解密 JWE，已 deprecated）
-                                                              │ 3. provider 取該 user 權限（命中快取就不打 IAM）
-                                                              │ 4. AND 比對 → 放行 / 401 / 403 / 502
-                                                              ▼
-                                          provider 未命中 ──HTTP──▶ IAMContext GET /employee-access/permissions/{userId}
+前端 ──HTTP──▶ CORS ─▶ BearerTokenAuth（驗證 JWE/at+jwt、驗 operatorId/applicationId、設定 Caller.current）─▶ PermissionMiddleware ─▶ handler
+                                                                            │ 1. method/path 比對 rules → 算出本請求所需權限
+                                                                            │ 2. 讀 Caller.current 拿 userId（沒有時才退回解密 JWE，已 deprecated）
+                                                                            │ 3. provider 取該 user 權限（命中快取就不打 IAM）
+                                                                            │ 4. AND 比對 → 放行 / 401 / 403 / 502
+                                                                            ▼
+                                                        provider 未命中 ──HTTP──▶ IAMContext GET /employee-access/permissions/{userId}
 ```
 
-受保護請求必帶：`Authorization: Bearer <token>`（at+jwt 或 legacy JWE）與 `operatorId: <id>`（須等於 token 內的使用者 id；`userId` 為 deprecated fallback）。application token 不需要 `operatorId`。
-
-> ⚠️ **在開放給 `.application` 的路由上，`operatorId` / `userId` header 不會被驗證，會原封不動傳到 handler。** handler 對 application 呼叫者不可信任它們，請讀 `Caller.current`（`if case .application(let c) = Caller.current`）。 `ProxyHeaderReceiverMiddleware` 不論是否通過驗證都會收下該 header，`ProxyHeaderSenderMiddleware` 會把它轉發到每一次下游呼叫，所以呼叫者自行指定的 `operatorId` 會連同 application token 一路傳到下游服務；下游若把 `operatorId` 記進事件，該行為就會被歸給呼叫者指定的人。
+受保護請求必帶：`Authorization: Bearer <token>`（at+jwt 或 legacy JWE）與 `operatorId: <id>`（`userId` 為 deprecated fallback）；`.application` 與 `.delegatedUser` 另須帶 `applicationId`，`.user` 可省略（Middleware 補上 `mendesky-first-party`）。各身分應帶的值見「呼叫者 header」。
 
 ---
 
@@ -357,6 +373,8 @@ let client = Client(serverURL: ..., transport: ..., middlewares: [
 ```
 
 `ProxyHeaderReceiverMiddleware`（server）+ `ProxyHeaderSenderMiddleware`（client）成對使用，在**同一個 async task** 內把 inbound header 透傳到 outbound 服務呼叫。
+
+`ProxyHeaderReceiverMiddleware` **一律**會收下 `applicationId`（不必列進 `presetKeys`；有列也不會收兩次）。`.application` / `.delegatedUser` 的請求由呼叫者自己帶 `applicationId`，不論 middleware 順序都收得到；`.user` 請求由 Bearer 補上的 `mendesky-first-party` 只有在 receiver 排在 Bearer **之後**才收得到——沒收到時，下游收到沒帶 `applicationId` 的 `.user` 請求也會自己補上，所以轉發不會因此失敗。
 
 ---
 

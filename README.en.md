@@ -51,7 +51,7 @@ swift test
 
 ## Authentication: `BearerTokenAuthenticationMiddleware`
 
-Verifies `Authorization: Bearer <token>`: the token is a JWE (legacy, 5 segments) or an at+jwt (3 segments, below), and the `operatorId` header (`userId` is the deprecated fallback) is checked to prevent token theft.
+Verifies `Authorization: Bearer <token>`: the token is a JWE (legacy, 5 segments) or an at+jwt (3 segments, below), and the `operatorId` (`userId` is the deprecated fallback) and `applicationId` headers are checked to prevent token theft (see "Caller headers" below).
 
 Keys are loaded from environment variables:
 
@@ -71,8 +71,6 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 
 Behavior & status codes:
 
-> ⚠️ **On routes opened for `.application`, the `operatorId` / `userId` headers are NOT verified and pass through to the handler unchanged.** Handlers must not trust them to identify an application caller; read `Caller.current` (`if case .application(let c) = Caller.current`). `ProxyHeaderReceiverMiddleware` stores the header regardless of authentication and `ProxyHeaderSenderMiddleware` forwards it on every downstream call, so a caller-chosen `operatorId` travels with the application token to downstream services; a downstream that records `operatorId` in events would attribute the action to whoever the caller named.
-
 | Case | Response |
 |---|---|
 | OPTIONS / whitelisted path | pass through (skipped) |
@@ -81,9 +79,26 @@ Behavior & status codes:
 | JWE decrypt failed / token expired | `401` |
 | JWE: no `operatorId` (or deprecated `userId`) header | `400` |
 | JWE: `operatorId` / `userId` header ≠ userId inside token | `400` (anti-theft) |
+| JWE: `applicationId` header present but ≠ `mendesky-first-party`, or repeated | `400` |
+| JWE: no `applicationId` | pass; the request passed on gets `applicationId: mendesky-first-party` |
 | Unexpected error during token verification | `401` |
 
 > Whitelisting uses `PathValidator` (below); matching paths skip authentication. `OPTIONS` is always skipped (for CORS preflight).
+
+### Caller headers: `operatorId` and `applicationId`
+
+After the route admission check, the middleware compares two headers (names in `CallerHeaders`) per identity, **exactly and case-sensitively**, against the values in `Caller.current`; missing, mismatched or repeated → `400`:
+
+| Identity | `operatorId` | `applicationId` |
+|---|---|---|
+| `.user` (JWE or at+jwt) | required, = the userId in the token (`sub`), verbatim | optional. When absent the middleware adds `applicationId: mendesky-first-party` (`CallerHeaders.firstPartyApplicationId`) to the request it passes on; when present it must be exactly that |
+| `.delegatedUser` | required, = `sub` | required, = the actor (`act.sub`, e.g. `mendesky-mcp-server`) |
+| `.application` | required, = the applicationId | required, = the applicationId |
+
+- The deprecated `userId` header is read only when `operatorId` is absent; `userId` **never** stands in for `applicationId`.
+- An `.application`'s applicationId is the token `sub` lowercased, so headers must carry the lowercase form (an uppercase UUID → `400`); what a handler reads from the header always equals `Caller.current`.
+- An `.application`'s `operatorId` is its applicationId today; it will later become the application's bound service account.
+- Whitelisted paths and `OPTIONS` are not checked and get no header added.
 
 ### Signed access tokens (`at+jwt`)
 
@@ -160,7 +175,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 ```
 
 - First-party users (JWE or at+jwt) need no opt-in; every route accepts them.
-- ⚠️ **On routes opened for `.application`, the `operatorId` / `userId` headers are NOT verified and pass through to the handler unchanged.** An application caller has no user, so handlers must not trust these headers; read `Caller.current` (`if case .application(let c) = Caller.current`) instead. `ProxyHeaderReceiverMiddleware` stores the header regardless of authentication and `ProxyHeaderSenderMiddleware` forwards it on every downstream call, so a caller-chosen `operatorId` travels with the application token to downstream services; a downstream that records `operatorId` in events would attribute the action to whoever the caller named.
+- `.application` and `.delegatedUser` must both send `operatorId` and `applicationId`; see "Caller headers" above.
 - When a route matches several `RouteAcceptance` entries they combine as a **union (OR)**: any one admitting is enough. Adding a broader entry later (e.g. without an actor restriction) silently widens an existing actor-restricted one.
 - The old `BearerTokenAuthenticationMiddleware(acceptsApplication:)` still works and equals `accepting: [.application(where:)]`.
 - `actors: nil` on `.delegatedUser` accepts any actor the issuer is trusted for; `requiresScope` is matched exactly (**`*` does not apply**), and a delegated token is always rejected if any scope item contains a `*` character (for example `*` or `quote:*`).
@@ -175,7 +190,10 @@ Behavior and status codes (at+jwt rows; the rest as in the table above):
 | Route not open to that caller (or actor not allowed by the route) | `401` |
 | `.delegatedUser`: route open and actor allowed, but scope lacks `requiresScope` | `403` (body `insufficient scope.`) |
 | `.user` and `.delegatedUser`: `operatorId` missing or ≠ `sub` | `400` (the `userId` header is a deprecated fallback) |
-| `.application` | no `operatorId` needed; if sent it is **not verified** and passes to the handler unchanged (see the warning above) |
+| `.application`: `operatorId` missing or ≠ the applicationId (lowercase) | `400` (the `userId` header is a deprecated fallback) |
+| `.delegatedUser`: `applicationId` missing or ≠ the actor (`act.sub`) | `400` |
+| `.application`: `applicationId` missing or ≠ the applicationId (lowercase) | `400` |
+| `.user`: `applicationId` present but ≠ `mendesky-first-party`; or a repeated `applicationId` for any identity | `400` |
 | 5-segment token with `MENDESKY_LEGACY_JWE=reject` | `401` |
 
 Verification accepts RS256 only (fixed, never taken from the token), requires the header to be exactly `{alg, typ, kid}` (extra parameters such as `crit` or `jwk` are refused), checks `typ`, `kid`, signature, `iss`, `aud` and `exp`, and requires `sub`, `sub_type`, `client_id` and `scope` to be present; failure reasons are logged, **never the token**.
@@ -300,18 +318,16 @@ try api.registerHandlers(on: router, serverURL: URL(string: "/opportunity-contex
 ### Request flow
 
 ```
-Frontend ──HTTP──▶ CORS ─▶ BearerTokenAuth (verify JWE/at+jwt, verify operatorId, set Caller.current) ─▶ PermissionMiddleware ─▶ handler
-                                                                        │ 1. match rules by method/path → required permissions
-                                                                        │ 2. read Caller.current → userId (decrypt the JWE only as the deprecated fallback)
-                                                                        │ 3. provider fetches the user's permissions (cache hit ⇒ no IAM call)
-                                                                        │ 4. AND-match → allow / 401 / 403 / 502
-                                                                        ▼
-                                                provider miss ──HTTP──▶ IAMContext GET /employee-access/permissions/{userId}
+Frontend ──HTTP──▶ CORS ─▶ BearerTokenAuth (verify JWE/at+jwt, verify operatorId/applicationId, set Caller.current) ─▶ PermissionMiddleware ─▶ handler
+                                                                                      │ 1. match rules by method/path → required permissions
+                                                                                      │ 2. read Caller.current → userId (decrypt the JWE only as the deprecated fallback)
+                                                                                      │ 3. provider fetches the user's permissions (cache hit ⇒ no IAM call)
+                                                                                      │ 4. AND-match → allow / 401 / 403 / 502
+                                                                                      ▼
+                                                              provider miss ──HTTP──▶ IAMContext GET /employee-access/permissions/{userId}
 ```
 
-A protected request must carry: `Authorization: Bearer <token>` (at+jwt or legacy JWE) and `operatorId: <id>` (must equal the user id inside the token; `userId` is the deprecated fallback). Application tokens need no `operatorId`.
-
-> ⚠️ **On routes opened for `.application`, the `operatorId` / `userId` headers are NOT verified and pass through to the handler unchanged.** Handlers must not trust them for application callers; read `Caller.current` (`if case .application(let c) = Caller.current`). `ProxyHeaderReceiverMiddleware` stores the header regardless of authentication and `ProxyHeaderSenderMiddleware` forwards it on every downstream call, so a caller-chosen `operatorId` travels with the application token to downstream services; a downstream that records `operatorId` in events would attribute the action to whoever the caller named.
+A protected request must carry: `Authorization: Bearer <token>` (at+jwt or legacy JWE) and `operatorId: <id>` (`userId` is the deprecated fallback); `.application` and `.delegatedUser` must also send `applicationId`, which `.user` may omit (the middleware fills in `mendesky-first-party`). See "Caller headers" for the values each identity sends.
 
 ---
 
@@ -357,6 +373,8 @@ let client = Client(serverURL: ..., transport: ..., middlewares: [
 ```
 
 `ProxyHeaderReceiverMiddleware` (server) + `ProxyHeaderSenderMiddleware` (client) are used as a pair to forward inbound headers to outbound service calls **within the same async task**.
+
+`ProxyHeaderReceiverMiddleware` **always** captures `applicationId` (no need to list it in `presetKeys`; listing it does not capture it twice). `.application` / `.delegatedUser` requests carry `applicationId` from the caller, so it is captured whatever the middleware order; for a `.user` request the `mendesky-first-party` value Bearer fills in is captured only when the receiver runs **after** Bearer — and a downstream that receives a `.user` request without `applicationId` fills it in itself, so forwarding never breaks.
 
 ---
 
