@@ -22,8 +22,14 @@ public enum BearerTokenAuthenticationMiddlewareError: Error {
 ///   `.delegatedUser`; without a trust configuration they are refused with `401`.
 ///
 /// A `.user` passes every route; `.application` and `.delegatedUser` only routes opened by a `RouteAcceptance`
-/// (`401` otherwise, `403` when a delegated user's scope lacks the route's required scope). `.user` and
-/// `.delegatedUser` callers must send an `operatorId` header equal to the token's subject (`400` otherwise).
+/// (`401` otherwise, `403` when a delegated user's scope lacks the route's required scope).
+///
+/// Admitted callers must then assert who they are in the `CallerHeaders`, compared exactly (`400` otherwise):
+/// - `operatorId` (or the deprecated `userId` when `operatorId` is absent): the token's subject for `.user` and
+///   `.delegatedUser`, the application id for `.application`.
+/// - `applicationId`: the actor (`act.sub`) for `.delegatedUser`, the application id for `.application`. Optional
+///   for `.user`: when absent, `applicationId: mendesky-first-party` is added to the request passed on; when present
+///   it must be exactly that. A repeated `applicationId` header is refused.
 public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
     public typealias Input = Request
     public typealias Output = Response
@@ -205,14 +211,12 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
             return Self.response(.forbidden, "insufficient scope.")
         }
 
-        // Verify the caller-asserted operator identity matches the token subject to prevent token theft.
-        // `operatorId` is canonical; `userId` is the deprecated fallback. Application callers have no operator.
-        if let subject = Self.operatorSubject(of: identity) {
-            guard let assertedOperatorId = AccessTokenVerification.operatorId(fromHeaders: input.headers),
-                  assertedOperatorId == subject
-            else {
-                return Response(status: .badRequest)
-            }
+        // Verify the caller-asserted identity headers match the token, so a stolen token cannot act as anyone else.
+        // `operatorId` is canonical; `userId` is the deprecated fallback (never for `applicationId`).
+        guard AccessTokenVerification.operatorId(fromHeaders: input.headers) == Self.expectedOperatorId(of: identity),
+              let request = Self.checkingApplicationId(of: identity, in: input)
+        else {
+            return Response(status: .badRequest)
         }
 
         // Counted only here: decrypted, admitted and operator-checked. Never carries the token or the userId.
@@ -225,7 +229,7 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         // Downstream runs outside the verification, so its errors never become 401.
         do {
             return try await Caller.$current.withValue(identity) {
-                try await next(input, context)
+                try await next(request, context)
             }
         } catch let error as any HTTPResponseError {
             throw error
@@ -288,13 +292,37 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         }
     }
 
-    /// The subject the `operatorId` header must equal, verbatim; `nil` for callers without an operator.
-    private static func operatorSubject(of identity: CallerIdentity) -> String? {
+    /// The value the `operatorId` header must equal, verbatim.
+    private static func expectedOperatorId(of identity: CallerIdentity) -> String {
         switch identity {
         case .user(let userId, _): userId
         case .delegatedUser(let claims): claims.userId
-        case .application: nil
+        // Service accounts will replace this with the application's bound service account.
+        case .application(let claims): claims.applicationId
         }
+    }
+
+    /// The value the `applicationId` header must equal, verbatim.
+    private static func expectedApplicationId(of identity: CallerIdentity) -> String {
+        switch identity {
+        case .user: CallerHeaders.firstPartyApplicationId
+        case .delegatedUser(let claims): claims.actor
+        case .application(let claims): claims.applicationId
+        }
+    }
+
+    /// The request to pass on when its `applicationId` header matches the caller, `nil` when it does not. A `.user`
+    /// request without one gets `applicationId: mendesky-first-party` added, so handlers and a
+    /// `ProxyHeaderReceiverMiddleware` placed after this middleware see it.
+    private static func checkingApplicationId(of identity: CallerIdentity, in request: Request) -> Request? {
+        let asserted = request.headers[values: CallerHeaders.applicationId]
+        if asserted.isEmpty, case .user = identity {
+            var head = request.head
+            head.headerFields.append(HTTPField(name: CallerHeaders.applicationId, value: CallerHeaders.firstPartyApplicationId))
+            return Request(head: head, body: request.body)
+        }
+        guard asserted == [expectedApplicationId(of: identity)] else { return nil }
+        return request
     }
 
     private static func unauthorized(_ message: String) -> Response {

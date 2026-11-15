@@ -38,13 +38,17 @@ func jweUserToken(userId: String, clientId: String = "c", expiresIn: TimeInterva
     return jwe.compactSerialization
 }
 
-/// `Authorization: Bearer <token>`, plus `operatorId` when given.
-func headers(_ token: String, operatorId: String? = nil) -> HTTPFields {
+/// `Authorization: Bearer <token>`, plus `operatorId` and `applicationId` when given.
+func headers(_ token: String, operatorId: String? = nil, applicationId: String? = nil) -> HTTPFields {
     var h = HTTPFields()
     h[.authorization] = "Bearer \(token)"
     if let operatorId { h[.init("operatorId")!] = operatorId }
+    if let applicationId { h[.init("applicationId")!] = applicationId }
     return h
 }
+
+/// `applicationId` of the `.delegatedUser` tokens in these tests: the actor (`act.sub`).
+let mcpActor = "mendesky-mcp-server"
 
 /// A one-line rendering of `Caller.current`, for handlers to echo back.
 func describe(_ caller: CallerIdentity?) -> String {

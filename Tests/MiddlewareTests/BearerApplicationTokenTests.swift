@@ -48,7 +48,8 @@ private func makeApp(
             let u = try await client.execute(uri: "/closed/boom", method: .get, headers: headers(user, operatorId: "u1"))
             #expect(u.status == .serviceUnavailable)
             #expect(String(buffer: u.body) == "service unavailable.")
-            let a = try await client.execute(uri: "/open/boom", method: .get, headers: headers(appToken))
+            let a = try await client.execute(
+                uri: "/open/boom", method: .get, headers: headers(appToken, operatorId: "app-1", applicationId: "app-1"))
             #expect(a.status == .serviceUnavailable)
             #expect(String(buffer: a.body) == "service unavailable.")
         }
@@ -89,18 +90,24 @@ private func makeApp(
     @Test func applicationTokenOnOptedInRoutePasses() async throws {
         let app = makeApp(signer: signer)
         let token = signer.token(sub: "ABCDEF01-0000-0000-0000-000000000001")
+        let applicationId = "abcdef01-0000-0000-0000-000000000001"
         try await app.test(.router) { client in
-            let res = try await client.execute(uri: "/open", method: .get, headers: headers(token, operatorId: "whoever"))
+            let res = try await client.execute(
+                uri: "/open", method: .get, headers: headers(token, operatorId: applicationId, applicationId: applicationId))
             #expect(res.status == .ok)
             #expect(String(buffer: res.body) == "application:abcdef01-0000-0000-0000-000000000001")
         }
     }
 
-    @Test func applicationTokenNeedsNoOperatorId() async throws {
+    @Test func applicationTokenWithoutCallerHeadersIs400() async throws {
         let app = makeApp(signer: signer)
+        let token = signer.token(sub: "app-1")
         try await app.test(.router) { client in
-            let res = try await client.execute(uri: "/open", method: .get, headers: headers(signer.token(sub: "app-1")))
-            #expect(res.status == .ok)
+            let none = try await client.execute(uri: "/open", method: .get, headers: headers(token))
+            #expect(none.status == .badRequest)
+            let whoever = try await client.execute(
+                uri: "/open", method: .get, headers: headers(token, operatorId: "whoever", applicationId: "app-1"))
+            #expect(whoever.status == .badRequest)
         }
     }
 
@@ -161,7 +168,9 @@ private func makeApp(
         try await app.test(.router) { client in
             let u = try await client.execute(uri: "/closed/missing", method: .get, headers: headers(user, operatorId: "u1"))
             #expect(u.status == .notFound)
-            let a = try await client.execute(uri: "/open/missing", method: .get, headers: headers(signer.token(sub: "app-1")))
+            let a = try await client.execute(
+                uri: "/open/missing", method: .get,
+                headers: headers(signer.token(sub: "app-1"), operatorId: "app-1", applicationId: "app-1"))
             #expect(a.status == .notFound)
         }
     }

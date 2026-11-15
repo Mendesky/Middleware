@@ -275,14 +275,16 @@ private func makeChainApp(
         let granted = try makeChainApp(
             rules: [try rule()], provider: recordingProvider(recorder, returning: ["business:read"]), accepting: accepting)
         try await granted.test(.router) { client in
-            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token, operatorId: "acc_1"))
+            let res = try await client.execute(
+                uri: "/quotations/1", method: .get, headers: headers(token, operatorId: "acc_1", applicationId: mcpActor))
             #expect(res.status == .ok)
         }
         #expect(await recorder.userIds == ["acc_1"])
 
         let denied = try makeChainApp(rules: [try rule()], provider: providerReturning([]), accepting: accepting)
         try await denied.test(.router) { client in
-            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token, operatorId: "acc_1"))
+            let res = try await client.execute(
+                uri: "/quotations/1", method: .get, headers: headers(token, operatorId: "acc_1", applicationId: mcpActor))
             #expect(res.status == .forbidden)
         }
     }
@@ -294,7 +296,8 @@ private func makeChainApp(
             accepting: [.application(PathValidator(try Regex("/quotations/.+")))])
         let token = oc.token(sub: "app-1", scope: "notification:send")
         try await app.test(.router) { client in
-            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token))
+            let res = try await client.execute(
+                uri: "/quotations/1", method: .get, headers: headers(token, operatorId: "app-1", applicationId: "app-1"))
             #expect(res.status == .unauthorized)
         }
         #expect(await recorder.userIds.isEmpty)

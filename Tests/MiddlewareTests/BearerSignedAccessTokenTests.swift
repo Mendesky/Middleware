@@ -141,7 +141,8 @@ private func applicationToken() -> String {
         let app = try makeApp(trust: configuredTrust())
         let token = applicationToken()
         try await app.test(.router) { client in
-            let open = try await client.execute(uri: "/open", method: .get, headers: headers(token))
+            let open = try await client.execute(
+                uri: "/open", method: .get, headers: headers(token, operatorId: "app-1", applicationId: "app-1"))
             #expect(open.status == .ok)
             #expect(String(buffer: open.body) == "application:app-1")
             for uri in ["/closed", "/quotes/1"] {
@@ -155,7 +156,7 @@ private func applicationToken() -> String {
         let app = try makeApp(trust: configuredTrust())
         try await app.test(.router) { client in
             let res = try await client.execute(
-                uri: "/quotes/1", method: .get, headers: headers(delegatedToken(), operatorId: "acc_1"))
+                uri: "/quotes/1", method: .get, headers: headers(delegatedToken(), operatorId: "acc_1", applicationId: mcpActor))
             #expect(res.status == .ok)
             #expect(String(buffer: res.body) == "delegated:acc_1:mendesky-mcp-server:mendesky-mcp-server:claude-connector")
         }
@@ -189,9 +190,10 @@ private func applicationToken() -> String {
         let app = try makeApp(trust: configuredTrust())
         let token = delegatedToken()
         try await app.test(.router) { client in
-            let missing = try await client.execute(uri: "/quotes/1", method: .get, headers: headers(token))
+            let missing = try await client.execute(uri: "/quotes/1", method: .get, headers: headers(token, applicationId: mcpActor))
             #expect(missing.status == .badRequest)
-            let mismatch = try await client.execute(uri: "/quotes/1", method: .get, headers: headers(token, operatorId: "acc_2"))
+            let mismatch = try await client.execute(
+                uri: "/quotes/1", method: .get, headers: headers(token, operatorId: "acc_2", applicationId: mcpActor))
             #expect(mismatch.status == .badRequest)
         }
     }
@@ -201,11 +203,14 @@ private func applicationToken() -> String {
         try await app.test(.router) { client in
             let other = try await client.execute(
                 uri: "/drafts", method: .get,
-                headers: headers(delegatedToken(scope: "quote:write", actors: ["other-mcp"]), operatorId: "acc_1"))
+                headers: headers(
+                    delegatedToken(scope: "quote:write", actors: ["other-mcp"]), operatorId: "acc_1", applicationId: "other-mcp"))
             #expect(other.status == .unauthorized)
             let allowed = try await client.execute(
                 uri: "/drafts", method: .get,
-                headers: headers(delegatedToken(scope: "quote:write", actors: ["mendesky-mcp-server"]), operatorId: "acc_1"))
+                headers: headers(
+                    delegatedToken(scope: "quote:write", actors: ["mendesky-mcp-server"]), operatorId: "acc_1",
+                    applicationId: mcpActor))
             #expect(allowed.status == .ok)
             #expect(String(buffer: allowed.body) == "delegated:acc_1:mendesky-mcp-server:mendesky-mcp-server:-")
         }
