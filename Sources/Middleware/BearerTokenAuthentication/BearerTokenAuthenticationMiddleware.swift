@@ -219,7 +219,7 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
             return Response(status: .badRequest)
         }
 
-        // Counted only here: decrypted, admitted and operator-checked. Never carries the token or the userId.
+        // Counted only here: decrypted, admitted and caller-header-checked. Never carries the token or the userId.
         if authenticated.viaLegacyJWE, case .user(_, let clientId) = identity {
             logger.log(level: legacyJWE == .warn ? .warning : .notice, "legacy-jwe-accepted", metadata: [
                 "clientId": .string(clientId), "route": .string(route), "service": .string(serviceName),
