@@ -213,8 +213,10 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         }
 
         // Verify the caller-asserted identity headers agree with the token, so a caller cannot name someone else.
-        // `operatorId` is canonical; `userId` is the deprecated fallback (never for `applicationId`).
-        guard AccessTokenVerification.operatorId(fromHeaders: input.headers) == Self.expectedOperatorId(of: identity),
+        // `operatorId` is canonical, `userId` the deprecated alias (never for `applicationId`); when both are sent
+        // they must agree. Compared by UTF-8 bytes.
+        guard let operatorId = AccessTokenVerification.operatorId(fromHeaders: input.headers),
+              AccessTokenVerification.bytesEqual(operatorId, Self.expectedOperatorId(of: identity)),
               let request = Self.checkingApplicationId(of: identity, in: input)
         else {
             return Response(status: .badRequest)
@@ -322,7 +324,9 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
             head.headerFields.append(HTTPField(name: CallerHeaders.applicationId, value: CallerHeaders.firstPartyApplicationId))
             return Request(head: head, body: request.body)
         }
-        guard asserted == [expectedApplicationId(of: identity)] else { return nil }
+        guard asserted.count == 1,
+              AccessTokenVerification.bytesEqual(asserted[0], expectedApplicationId(of: identity))
+        else { return nil }
         return request
     }
 
