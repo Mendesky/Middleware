@@ -20,6 +20,8 @@ public struct PermissionRule: Sendable {
     ///   - pathMatcher: a path predicate. Note `PathValidator(_: String)` matches the path
     ///     *literally* (`Regex(verbatim:)`); for patterns use the regex initializer, e.g.
     ///     `PathValidator(try Regex("/quotations/.+"))` or the `@RegexComponentBuilder` form.
+    ///     The path is normalized like Hummingbird's router does (empty segments dropped), so
+    ///     `/quotations/1/` and `//quotations/1` match a rule written for `/quotations/1`.
     ///   - methods: HTTP methods this rule covers; `nil` = any method.
     ///   - requiredPermissions: permissions the token must hold (exact match, AND semantics).
     public init(_ pathMatcher: any WhitelistValidator,

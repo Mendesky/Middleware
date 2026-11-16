@@ -1,6 +1,13 @@
 import Hummingbird
 import RegexBuilder
 
+/// Matches the request path against a literal, a `Regex` or a `RegexComponentBuilder` pattern.
+///
+/// The path is normalized the way Hummingbird's router splits it before matching: empty segments are
+/// dropped and the rest rejoined as `/` + segments joined by `/` (empty becomes `/`). So `/a/b/`,
+/// `//a/b` and `/a//b` are matched exactly like `/a/b`, the same path the router routes them to.
+/// Nothing else is normalized: `.`/`..` segments and percent-encoding are left as they are, because
+/// the router leaves them as they are too.
 public struct PathValidator: WhitelistValidator {
     private struct Matcher: @unchecked Sendable {
         let check: (String) -> Bool
@@ -24,6 +31,11 @@ public struct PathValidator: WhitelistValidator {
     }
 
     public func isWhitelisted(_ request: Request) -> Bool {
-        matcher(request.uri.path)
+        matcher(Self.normalized(request.uri.path))
+    }
+
+    /// Mirrors `Trie.ResolveContext.pathComponents` in Hummingbird (`split(separator: "/", omittingEmptySubsequences: true)`).
+    static func normalized(_ path: String) -> String {
+        "/" + path.split(separator: "/", omittingEmptySubsequences: true).joined(separator: "/")
     }
 }

@@ -81,7 +81,7 @@ Behavior & status codes:
 | `userId` header ≠ userId inside token | `400` (anti-theft) |
 | Unexpected error during token verification | `401` |
 
-> Whitelisting uses `PathValidator` (below); matching paths skip authentication. `OPTIONS` is always skipped (for CORS preflight).
+> Whitelisting uses `PathValidator` (below); matching paths skip authentication. `OPTIONS` is always skipped (for CORS preflight). `PathValidator` normalizes the path the way Hummingbird's router splits it (empty segments dropped) before matching, so `/health/` and `//health` are the same path as `/health`.
 
 ### Application tokens (external systems)
 
