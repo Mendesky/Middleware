@@ -410,3 +410,39 @@ private func logLines(_ store: CapturingLogHandler.Store, containing text: Strin
         }
     }
 }
+
+@Suite struct HeadRequestMatchingTests {
+    private func request(_ method: HTTPRequest.Method, _ path: String = "/quotations/1") -> Request {
+        Request(
+            head: HTTPRequest(method: method, scheme: nil, authority: nil, path: path),
+            body: RequestBody(buffer: ByteBuffer())
+        )
+    }
+
+    @Test func permissionRuleForGetAlsoCoversHead() throws {
+        let rule = try pathRule("/quotations/.+", methods: [.get], requires: ["business:read"])
+        #expect(rule.matches(request(.get)))
+        #expect(rule.matches(request(.head)))
+        #expect(!rule.matches(request(.post)))
+    }
+
+    @Test func permissionRuleWithoutGetDoesNotCoverHead() throws {
+        let rule = try pathRule("/quotations/.+", methods: [.post], requires: ["business:write"])
+        #expect(!rule.matches(request(.head)))
+        #expect(try pathRule("/quotations/.+", requires: ["x"]).matches(request(.head)))
+    }
+
+    @Test func routeAcceptanceForGetAlsoCoversHead() {
+        let path = PathValidator("/quotations/1")
+        for acceptance in [
+            RouteAcceptance.application(path, methods: [.get]),
+            RouteAcceptance.delegatedUser(path, methods: [.get], requiresScope: "quote:read"),
+        ] {
+            #expect(acceptance.matches(request(.get)))
+            #expect(acceptance.matches(request(.head)))
+            #expect(!acceptance.matches(request(.post)))
+        }
+        #expect(!RouteAcceptance.application(path, methods: [.post]).matches(request(.head)))
+        #expect(RouteAcceptance.application(path).matches(request(.head)))
+    }
+}

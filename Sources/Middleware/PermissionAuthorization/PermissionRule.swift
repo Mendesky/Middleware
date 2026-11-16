@@ -34,12 +34,20 @@ public struct PermissionRule: Sendable {
 
     /// Whether this rule applies to the given request (method filter, then path predicate).
     func matches(_ request: Request) -> Bool {
-        if let methods, !methods.contains(request.method) { return false }
+        if let methods, !methods.covers(request.method) { return false }
         return pathMatcher.isWhitelisted(request)
     }
 
     /// AND semantics: every required permission must be present in `granted` (exact match).
     func isSatisfied(by granted: Set<String>) -> Bool {
         requiredPermissions.allSatisfy(granted.contains)
+    }
+}
+
+extension Set<HTTPRequest.Method> {
+    /// Whether a rule limited to these methods covers `method`. A `HEAD` request is a `GET` without the body, so a
+    /// rule written for `GET` covers it too (otherwise it would slip past the rule on a router that answers `HEAD`).
+    func covers(_ method: HTTPRequest.Method) -> Bool {
+        contains(method) || (method == .head && contains(.get))
     }
 }

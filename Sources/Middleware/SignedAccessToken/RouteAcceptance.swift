@@ -54,7 +54,7 @@ public struct RouteAcceptance: Sendable {
         _ path: any WhitelistValidator, _ methods: Set<HTTPRequest.Method>?
     ) -> @Sendable (Request) -> Bool {
         { request in
-            if let methods, !methods.contains(request.method) { return false }
+            if let methods, !methods.covers(request.method) { return false }
             return path.isWhitelisted(request)
         }
     }
