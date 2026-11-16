@@ -51,7 +51,7 @@ swift test
 
 ## 認證：`BearerTokenAuthenticationMiddleware`
 
-驗證 `Authorization: Bearer <token>`：token 是 JWE（legacy，5 段）或 at+jwt（3 段，見下方）；並比對 `operatorId`（`userId` 為 deprecated fallback）與 `applicationId` header 防盜用（見下方「呼叫者 header」）。
+驗證 `Authorization: Bearer <token>`：token 是 JWE（legacy，5 段）或 at+jwt（3 段，見下方）；並比對 `operatorId`（`userId` 為 deprecated fallback）與 `applicationId` header，確保 header 與 token 一致、不能指定別人（見下方「呼叫者 header」）。
 
 金鑰從環境變數載入：
 
@@ -78,7 +78,8 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | 不是 `Bearer <token>` 格式 | `400` |
 | JWE 解密失敗 / token 過期 | `401` |
 | JWE：沒帶 `operatorId`（或 deprecated 的 `userId`）header | `400` |
-| JWE：`operatorId` / `userId` header ≠ token 內 userId | `400`（防盜用）|
+| JWE：`operatorId` / `userId` header ≠ token 內 userId | `400`（確保 header 與 token 一致、不能指定別人）|
+| JWE：重複的 `operatorId` header；或沒有 `operatorId` 而 `userId` 重複 | `400` |
 | JWE：`applicationId` header 有帶但 ≠ `mendesky-first-party`，或重複 | `400` |
 | JWE：沒帶 `applicationId` | 放行，傳下去的請求補上 `applicationId: mendesky-first-party` |
 | 驗證本身出錯（token 驗證流程的非預期錯誤）| `401` |
@@ -87,7 +88,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 
 ### 呼叫者 header：`operatorId` 與 `applicationId`
 
-通過路由開放檢查後，Middleware 依身分比對兩個 header（名稱見 `CallerHeaders`），**精確、區分大小寫**，比對對象就是 `Caller.current` 裡的值；缺少、不符或重複都回 `400`：
+通過路由開放檢查後，Middleware 依身分比對兩個 header（名稱見 `CallerHeaders`），**精確、區分大小寫**，比對對象就是 `Caller.current` 裡的值；缺少、不符或重複都回 `400`（目的是確保 header 與 token 一致、不能指定別人；拿到 token 的人本來就讀得到裡面的值，所以這不能防止 token 被盜用）：
 
 | 身分 | `operatorId` | `applicationId` |
 |---|---|---|
@@ -95,7 +96,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | `.delegatedUser` | 必帶，= `sub` | 必帶，= actor（`act.sub`，例如 `mendesky-mcp-server`）|
 | `.application` | 必帶，= applicationId | 必帶，= applicationId |
 
-- `operatorId` 缺少時才讀 deprecated 的 `userId` header；`userId` **永遠不能**代替 `applicationId`。
+- `operatorId` 缺少時才讀 deprecated 的 `userId` header（`operatorId` 存在時，重複的 `userId` 直接忽略；沒有 `operatorId` 時，重複的 `userId` 回 `400`）；重複的 `operatorId` 一律回 `400`；`userId` **永遠不能**代替 `applicationId`。
 - `.application` 的 applicationId 是 token `sub` 轉小寫後的值，header 必須帶小寫（帶大寫 UUID 會 `400`），所以 handler 從 header 讀到的值一定等於 `Caller.current`。
 - `.application` 的 `operatorId` 目前等於 applicationId；之後會改為該 application 綁定的 service account。
 - 白名單路徑與 `OPTIONS` 不檢查、也不補 header。
@@ -108,7 +109,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 - **application**：外部系統用 OAuth `client_credentials` 取得，**沒有使用者帳號**（`sub_type: application`，`sub` 為 applicationId，對外以小寫呈現），路由必須明確開放。
 - **delegatedUser**：使用者的 token 由代理者（actor，例如 MCP server）持有（`sub_type: user` 且帶 `act`，RFC 8693），路由必須明確開放。
 
-claims：`iss`、`aud`（`mendesky-services`，字串或陣列皆可）、`sub`、`sub_type`、`client_id`、`scope`（空白分隔，可為空字串但必須存在）、`exp`。發行者一律會設 `iat`、`jti`，但 Middleware 不要求也不檢查它們。
+claims：`iss`、`aud`（`mendesky-services`，字串或陣列皆可）、`sub`、`sub_type`、`client_id`、`scope`（空白分隔，可為空字串但必須存在）、`exp`；`nbf` 可有可無，有的話必須是 JSON 數字（布林、字串都不算）且不晚於現在（和 `exp` 一樣不留時鐘誤差），否則回 `401`。發行者一律會設 `iat`、`jti`，但 Middleware 不要求也不檢查它們。
 
 #### 信任設定
 
@@ -154,7 +155,9 @@ claims：`iss`、`aud`（`mendesky-services`，字串或陣列皆可）、`sub`�
 | `warn` | 同上，但以 `.warning` 記錄 |
 | `reject` | 5 段 token 不解密，記 `legacy-jwe-rejected`（`.notice`）並回 `401` |
 
-其他值會啟動失敗。**只有**讀環境變數的 init 會讀這個變數：Bearer 的 `init(validators:)`、`init(validators:accepting:)`、`init(validators:acceptsApplication:)`，以及 `PermissionMiddleware.init(rules:provider:)`（沒有 Bearer 在前面時的 JWE fallback 同樣遵守此開關）。明確傳參數的 init（Bearer 的 `init(verification:validators:)`、`init(verification:applicationTokens:validators:acceptsApplication:logger:)` 永遠是 `accept`；`init(verification:trust:legacyJWE:…)` 預設 `accept`；`PermissionMiddleware.init(rules:provider:verification:…)`）使用傳入的值（或 `accept`），**忽略**此環境變數。`legacy-jwe-accepted` 的 metadata 只有 `clientId`（JWE 內的 clientId，第一方為空字串）、`route`（路由樣板如 `/items/{id}`，不是實際路徑；取不到時為 `unknown`）、`service`（預設為 process 名稱，可由 init 參數覆寫）；`legacy-jwe-rejected` 只有 `route`、`service`。log **不含 token、不含 userId**。若 `PermissionMiddleware` 放在 Bearer 前面，同一個 JWE 會被記兩次 `legacy-jwe-accepted`，Permission 也會先記下之後被 Bearer 以 `400` 擋掉的請求；計數只會多算、不會少算，不影響用「計數歸零」判斷能否移除 JWE。
+其他值會啟動失敗。**只有**讀環境變數的 init 會讀這個變數：Bearer 的 `init(validators:)`、`init(validators:accepting:)`、`init(validators:acceptsApplication:)`，以及 `PermissionMiddleware.init(rules:provider:)`（沒有 Bearer 在前面時的 JWE fallback 同樣遵守此開關）。明確傳參數的 init（Bearer 的 `init(verification:validators:)`、`init(verification:applicationTokens:validators:acceptsApplication:logger:)` 永遠是 `accept`；`init(verification:trust:legacyJWE:…)` 預設 `accept`；`PermissionMiddleware.init(rules:provider:verification:…)`）使用傳入的值（或 `accept`），**忽略**此環境變數。`legacy-jwe-accepted` 的 metadata 只有 `clientId`（JWE 內的 clientId，第一方為空字串）、`route`（路由樣板如 `/items/{id}`，不是實際路徑；取不到時為 `unknown`）、`service`（預設為 process 名稱，可由 init 參數覆寫）；`legacy-jwe-rejected` 只有 `route`、`service`。log **不含 token、不含 userId**。若 `PermissionMiddleware` 放在 Bearer 前面，同一個 JWE 會被記兩次 `legacy-jwe-accepted`，Permission 也會先記下之後被 Bearer 以 `400` 擋掉的請求；計數只會多算、不會少算。
+
+計數歸零本身還不夠判斷能否移除 JWE：低頻的 client 可能每隔幾週才出現一次。建議先設 `MENDESKY_LEGACY_JWE=warn` 觀察一段時間，再改 `reject`，確認沒有人受影響後才移除 JWE 支援（見設計文件 §9）。
 
 #### 開放路由：`accepting: [RouteAcceptance]`
 
@@ -194,9 +197,11 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | `.delegatedUser`：沒帶 `applicationId` 或 ≠ actor（`act.sub`）| `400` |
 | `.application`：沒帶 `applicationId` 或 ≠ applicationId（小寫）| `400` |
 | `.user`：`applicationId` 有帶但 ≠ `mendesky-first-party`；或任何身分帶了重複的 `applicationId` | `400` |
+| 任何身分：重複的 `operatorId`；或沒有 `operatorId` 而 `userId` 重複（有 `operatorId` 時不看 `userId`）| `400` |
+| at+jwt：`nbf` 不是 JSON 數字，或晚於現在 | `401` |
 | 5 段 token 且 `MENDESKY_LEGACY_JWE=reject` | `401` |
 
-驗證只收 RS256（固定演算法、不從 token 取），header 必須剛好是 `{alg, typ, kid}`（多帶 `crit`、`jwk` 等參數一律拒收），並檢查 `typ`、`kid`、簽章、`iss`、`aud`、`exp`，且 `sub`、`sub_type`、`client_id`、`scope` 必須存在；失敗的原因記在 log，**絕不記 token**。
+驗證只收 RS256（固定演算法、不從 token 取），header 必須剛好是 `{alg, typ, kid}`（多帶 `crit`、`jwk` 等參數一律拒收），並檢查 `typ`、`kid`、簽章、`iss`、`aud`、`exp`、`nbf`（有帶才檢查），且 `sub`、`sub_type`、`client_id`、`scope` 必須存在；失敗的原因記在 log，**絕不記 token**。
 
 #### 在 handler 裡取得呼叫者
 

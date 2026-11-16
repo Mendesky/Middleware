@@ -51,7 +51,7 @@ swift test
 
 ## Authentication: `BearerTokenAuthenticationMiddleware`
 
-Verifies `Authorization: Bearer <token>`: the token is a JWE (legacy, 5 segments) or an at+jwt (3 segments, below), and the `operatorId` (`userId` is the deprecated fallback) and `applicationId` headers are checked to prevent token theft (see "Caller headers" below).
+Verifies `Authorization: Bearer <token>`: the token is a JWE (legacy, 5 segments) or an at+jwt (3 segments, below), and the `operatorId` (`userId` is the deprecated fallback) and `applicationId` headers are checked so that the headers agree with the token and a caller cannot name someone else (see "Caller headers" below).
 
 Keys are loaded from environment variables:
 
@@ -78,7 +78,8 @@ Behavior & status codes:
 | Not `Bearer <token>` format | `400` |
 | JWE decrypt failed / token expired | `401` |
 | JWE: no `operatorId` (or deprecated `userId`) header | `400` |
-| JWE: `operatorId` / `userId` header ≠ userId inside token | `400` (anti-theft) |
+| JWE: `operatorId` / `userId` header ≠ userId inside token | `400` (ensures the headers agree with the token; a caller cannot name someone else) |
+| JWE: repeated `operatorId` header; or no `operatorId` and a repeated `userId` | `400` |
 | JWE: `applicationId` header present but ≠ `mendesky-first-party`, or repeated | `400` |
 | JWE: no `applicationId` | pass; the request passed on gets `applicationId: mendesky-first-party` |
 | Unexpected error during token verification | `401` |
@@ -87,7 +88,7 @@ Behavior & status codes:
 
 ### Caller headers: `operatorId` and `applicationId`
 
-After the route admission check, the middleware compares two headers (names in `CallerHeaders`) per identity, **exactly and case-sensitively**, against the values in `Caller.current`; missing, mismatched or repeated → `400`:
+After the route admission check, the middleware compares two headers (names in `CallerHeaders`) per identity, **exactly and case-sensitively**, against the values in `Caller.current`; missing, mismatched or repeated → `400` (this ensures the headers agree with the token and a caller cannot name someone else; it does not stop a stolen token, since whoever holds the token can read the right values from it):
 
 | Identity | `operatorId` | `applicationId` |
 |---|---|---|
@@ -95,7 +96,7 @@ After the route admission check, the middleware compares two headers (names in `
 | `.delegatedUser` | required, = `sub` | required, = the actor (`act.sub`, e.g. `mendesky-mcp-server`) |
 | `.application` | required, = the applicationId | required, = the applicationId |
 
-- The deprecated `userId` header is read only when `operatorId` is absent; `userId` **never** stands in for `applicationId`.
+- The deprecated `userId` header is read only when `operatorId` is absent (when `operatorId` is present a repeated `userId` is ignored; with no `operatorId`, a repeated `userId` → `400`); a repeated `operatorId` is always `400`; `userId` **never** stands in for `applicationId`.
 - An `.application`'s applicationId is the token `sub` lowercased, so headers must carry the lowercase form (an uppercase UUID → `400`); what a handler reads from the header always equals `Caller.current`.
 - An `.application`'s `operatorId` is its applicationId today; it will later become the application's bound service account.
 - Whitelisted paths and `OPTIONS` are not checked and get no header added.
@@ -108,7 +109,7 @@ Besides user JWE tokens, `BearerTokenAuthenticationMiddleware` accepts **signed 
 - **application**: an external system using OAuth `client_credentials`, with **no user account** (`sub_type: application`, `sub` is the applicationId, exposed lowercased); the route must opt in explicitly.
 - **delegatedUser**: a user's token held by an actor such as an MCP server (`sub_type: user` with an `act` claim, RFC 8693); the route must opt in explicitly.
 
-Claims: `iss`, `aud` (`mendesky-services`, string or array), `sub`, `sub_type`, `client_id`, `scope` (space-delimited; may be an empty string but must be present), `exp`. The issuer always sets `iat` and `jti`, but Middleware neither requires nor checks them.
+Claims: `iss`, `aud` (`mendesky-services`, string or array), `sub`, `sub_type`, `client_id`, `scope` (space-delimited; may be an empty string but must be present), `exp`; `nbf` is optional, but when present it must be a JSON number (a boolean or string is not one) no later than now (no clock-skew leeway, like `exp`), otherwise `401`. The issuer always sets `iat` and `jti`, but Middleware neither requires nor checks them.
 
 #### Trust configuration
 
@@ -154,7 +155,9 @@ Claims: `iss`, `aud` (`mendesky-services`, string or array), `sub`, `sub_type`, 
 | `warn` | Same, logged at `.warning` |
 | `reject` | 5-segment tokens are not decrypted; logs `legacy-jwe-rejected` (`.notice`) and answers `401` |
 
-Any other value fails startup. **Only** the environment-reading inits read this variable: Bearer's `init(validators:)`, `init(validators:accepting:)`, `init(validators:acceptsApplication:)`, and `PermissionMiddleware.init(rules:provider:)` (its JWE fallback, when no Bearer runs in front, honours the switch too). The explicit inits (Bearer's `init(verification:validators:)` and `init(verification:applicationTokens:validators:acceptsApplication:logger:)`, always `accept`; `init(verification:trust:legacyJWE:…)`, default `accept`; `PermissionMiddleware.init(rules:provider:verification:…)`) use the value passed (or `accept`) and **ignore** the variable. The `legacy-jwe-accepted` metadata holds only `clientId` (the clientId inside the JWE; empty for first-party), `route` (the route template such as `/items/{id}`, not the actual path; `unknown` if unavailable) and `service` (defaults to the process name, overridable via an init parameter); `legacy-jwe-rejected` holds only `route` and `service`. The logs **never contain the token or the userId**. With `PermissionMiddleware` placed before Bearer, one JWE is logged as `legacy-jwe-accepted` twice, and Permission also logs requests Bearer later refuses with `400`; the count can only overcount, never undercount, so "the counter reached zero" still tells you JWE can be removed.
+Any other value fails startup. **Only** the environment-reading inits read this variable: Bearer's `init(validators:)`, `init(validators:accepting:)`, `init(validators:acceptsApplication:)`, and `PermissionMiddleware.init(rules:provider:)` (its JWE fallback, when no Bearer runs in front, honours the switch too). The explicit inits (Bearer's `init(verification:validators:)` and `init(verification:applicationTokens:validators:acceptsApplication:logger:)`, always `accept`; `init(verification:trust:legacyJWE:…)`, default `accept`; `PermissionMiddleware.init(rules:provider:verification:…)`) use the value passed (or `accept`) and **ignore** the variable. The `legacy-jwe-accepted` metadata holds only `clientId` (the clientId inside the JWE; empty for first-party), `route` (the route template such as `/items/{id}`, not the actual path; `unknown` if unavailable) and `service` (defaults to the process name, overridable via an init parameter); `legacy-jwe-rejected` holds only `route` and `service`. The logs **never contain the token or the userId**. With `PermissionMiddleware` placed before Bearer, one JWE is logged as `legacy-jwe-accepted` twice, and Permission also logs requests Bearer later refuses with `400`; the count can only overcount, never undercount.
+
+A zero count is not enough by itself to tell you JWE can be removed: a low-frequency client may show up only every few weeks. First set `MENDESKY_LEGACY_JWE=warn` and watch for a period, then `reject`, and only then remove JWE support (design §9).
 
 #### Opening routes: `accepting: [RouteAcceptance]`
 
@@ -194,9 +197,11 @@ Behavior and status codes (at+jwt rows; the rest as in the table above):
 | `.delegatedUser`: `applicationId` missing or ≠ the actor (`act.sub`) | `400` |
 | `.application`: `applicationId` missing or ≠ the applicationId (lowercase) | `400` |
 | `.user`: `applicationId` present but ≠ `mendesky-first-party`; or a repeated `applicationId` for any identity | `400` |
+| Any identity: repeated `operatorId`; or no `operatorId` and a repeated `userId` (`userId` is ignored when `operatorId` is present) | `400` |
+| at+jwt: `nbf` not a JSON number, or later than now | `401` |
 | 5-segment token with `MENDESKY_LEGACY_JWE=reject` | `401` |
 
-Verification accepts RS256 only (fixed, never taken from the token), requires the header to be exactly `{alg, typ, kid}` (extra parameters such as `crit` or `jwk` are refused), checks `typ`, `kid`, signature, `iss`, `aud` and `exp`, and requires `sub`, `sub_type`, `client_id` and `scope` to be present; failure reasons are logged, **never the token**.
+Verification accepts RS256 only (fixed, never taken from the token), requires the header to be exactly `{alg, typ, kid}` (extra parameters such as `crit` or `jwk` are refused), checks `typ`, `kid`, signature, `iss`, `aud`, `exp` and `nbf` (when present), and requires `sub`, `sub_type`, `client_id` and `scope` to be present; failure reasons are logged, **never the token**.
 
 #### Reading the caller in a handler
 
