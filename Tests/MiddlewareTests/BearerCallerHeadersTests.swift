@@ -241,3 +241,68 @@ private func rawHeaders(_ token: String, _ pairs: [(String, String)]) -> HTTPFie
         }
     }
 }
+
+@Suite struct BearerRepeatedOperatorIdTests {
+    /// Every caller type with the headers that are right for it besides `operatorId`.
+    private func callers() throws -> [(name: String, token: String, operatorId: String, applicationId: String?)] {
+        [
+            ("jwe", try jweUserToken(userId: "u1"), "u1", nil),
+            ("at+jwt user", atJwtUser(), "acc_1", nil),
+            ("delegated", delegatedToken(), "acc_1", mcpActor),
+            ("application", applicationToken(), appId, appId),
+        ]
+    }
+
+    private func pairs(_ caller: (name: String, token: String, operatorId: String, applicationId: String?), _ first: [(String, String)]) -> HTTPFields {
+        rawHeaders(caller.token, first + (caller.applicationId.map { [("applicationId", $0)] } ?? []))
+    }
+
+    @Test func repeatedOperatorIdIsRefusedEvenWhenOneMatches() async throws {
+        let app = try makeApp()
+        try await app.test(.router) { client in
+            for c in try callers() {
+                for second in [c.operatorId, "other"] {
+                    let res = try await client.execute(
+                        uri: "/open", method: .get, headers: pairs(c, [("operatorId", c.operatorId), ("operatorId", second)]))
+                    #expect(res.status == .badRequest, "\(c.name) with second operatorId \(second)")
+                }
+            }
+        }
+    }
+
+    @Test func repeatedUserIdWithoutOperatorIdIsRefused() async throws {
+        let app = try makeApp()
+        try await app.test(.router) { client in
+            for c in try callers() {
+                let res = try await client.execute(
+                    uri: "/open", method: .get, headers: pairs(c, [("userId", c.operatorId), ("userId", c.operatorId)]))
+                #expect(res.status == .badRequest, "\(c.name)")
+            }
+        }
+    }
+
+    @Test func repeatedUserIdIsIgnoredWhenOperatorIdIsPresent() async throws {
+        let app = try makeApp()
+        try await app.test(.router) { client in
+            for c in try callers() {
+                let res = try await client.execute(
+                    uri: "/open", method: .get, headers: pairs(c, [("operatorId", c.operatorId), ("userId", "x"), ("userId", "y")]))
+                #expect(res.status == .ok, "\(c.name)")
+            }
+        }
+    }
+
+    @Test func singleValuesBehaveAsBefore() async throws {
+        let app = try makeApp()
+        try await app.test(.router) { client in
+            for c in try callers() {
+                let viaOperatorId = try await client.execute(uri: "/open", method: .get, headers: pairs(c, [("operatorId", c.operatorId)]))
+                #expect(viaOperatorId.status == .ok, "\(c.name)")
+                let viaUserId = try await client.execute(uri: "/open", method: .get, headers: pairs(c, [("userId", c.operatorId)]))
+                #expect(viaUserId.status == .ok, "\(c.name)")
+                let wrong = try await client.execute(uri: "/open", method: .get, headers: pairs(c, [("operatorId", "other")]))
+                #expect(wrong.status == .badRequest, "\(c.name)")
+            }
+        }
+    }
+}

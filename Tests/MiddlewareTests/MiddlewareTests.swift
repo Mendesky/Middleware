@@ -73,6 +73,14 @@ import HTTPTypes
         #expect(AccessTokenVerification.operatorId(fromHeaders: h) == "op-1")
     }
 
+    @Test func repeatedOperatorIdOrRepeatedFallbackUserIdIsNeverAValue() {
+        #expect(AccessTokenVerification.operatorId(fromHeaders: headers([("operatorId", "a"), ("operatorId", "a")])) == nil)
+        #expect(AccessTokenVerification.operatorId(fromHeaders: headers([("operatorId", "a"), ("operatorId", "b")])) == nil)
+        #expect(AccessTokenVerification.operatorId(fromHeaders: headers([("userId", "a"), ("userId", "a")])) == nil)
+        // userId is only the fallback: repeated, it is ignored when operatorId is present.
+        #expect(AccessTokenVerification.operatorId(fromHeaders: headers([("operatorId", "a"), ("userId", "x"), ("userId", "y")])) == "a")
+    }
+
     @Test func returnsNilWhenNeitherPresent() {
         #expect(AccessTokenVerification.operatorId(fromHeaders: headers([])) == nil)
     }

@@ -100,14 +100,17 @@ extension AccessTokenVerification {
     ///
     /// `operatorId` is the canonical header; `userId` is the deprecated predecessor and is only
     /// consulted when `operatorId` is absent. When `operatorId` is present it wins outright —
-    /// a conflicting `userId` is ignored, not rejected. Returns `nil` when neither header is set.
+    /// a conflicting `userId` (even a repeated one) is ignored, not rejected. Returns `nil` when neither
+    /// header is set, and also when the header that decides is repeated (two or more `operatorId`
+    /// fields, or no `operatorId` and two or more `userId` fields): a repeated header names no single
+    /// operator, so nothing matches it and the auth middleware answers `400`.
     public static func operatorId(fromHeaders headers: HTTPFields) -> String? {
-        if let value = headers.first(where: { $0.name == CallerHeaders.operatorId })?.value {
-            return value
+        let operatorIds = headers[values: CallerHeaders.operatorId]
+        if !operatorIds.isEmpty {
+            return operatorIds.count == 1 ? operatorIds[0] : nil
         }
-        if let key = HTTPField.Name("userId"), let value = headers.first(where: { $0.name == key })?.value {
-            return value
-        }
-        return nil
+        guard let key = HTTPField.Name("userId") else { return nil }
+        let userIds = headers[values: key]
+        return userIds.count == 1 ? userIds[0] : nil
     }
 }
