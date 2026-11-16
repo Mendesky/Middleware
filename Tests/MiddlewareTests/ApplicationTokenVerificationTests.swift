@@ -61,6 +61,14 @@ private func expectError(_ expected: ApplicationTokenError, _ v: ApplicationToke
         #expect(throws: Never.self) { try justBefore.verify(compactString: token) }
     }
 
+    @Test func futureNbfIsNotYetValidNotExpired() throws {
+        let signer = ApplicationTokenTestSigner()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let payload = #"{"iss":"\#(issuer)","aud":["\#(audience)"],"sub":"\#(appId)","client_id":"c","scope":"*","exp":1700003600,"nbf":1700000001}"#
+        let token = signer.rawToken(headerJSON: #"{"alg":"RS256","typ":"at+jwt","kid":"\#(signer.publicKey.keyID!)"}"#, payloadJSON: payload)
+        expectError(.notYetValid, try verification([signer], now: { now }), token)
+    }
+
     @Test func rejectsAnotherKeysSignature() throws {
         let configured = ApplicationTokenTestSigner(kid: "same")
         let impostor = ApplicationTokenTestSigner(kid: "same")

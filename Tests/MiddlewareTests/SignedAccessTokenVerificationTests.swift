@@ -378,6 +378,34 @@ private func claimsJSON(exp: Int = 99999999999, extra: String = "") -> String {
         oc.rawToken(headerJSON: Self.ocHeader, payloadJSON: claimsJSON(extra: nbf.map { #","nbf":\#($0)"# } ?? ""))
     }
 
+    @Test func expThatIsNotANumberIsRejected() throws {
+        let v = try verification(now: { Self.clock })
+        for exp in ["true", "false", "null", #""99999999999""#, "[]"] {
+            let payload = #"{"iss":"https://oidc.test","aud":["\#(audience)"],"sub":"x","sub_type":"application","client_id":"c","scope":"*","exp":\#(exp)}"#
+            let token = oc.rawToken(headerJSON: Self.ocHeader, payloadJSON: payload)
+            expectError(.invalidClaim("exp"), v, token)
+        }
+        let missing = #"{"iss":"https://oidc.test","aud":["\#(audience)"],"sub":"x","sub_type":"application","client_id":"c","scope":"*"}"#
+        expectError(.missingClaim("exp"), v, oc.rawToken(headerJSON: Self.ocHeader, payloadJSON: missing))
+    }
+
+    @Test func expAndNbfAreComparedAgainstTheSameInstant() throws {
+        // A clock that moves on every read: exp and nbf must still be judged at one instant (the first read).
+        final class Ticking: @unchecked Sendable {
+            private let lock = NSLock()
+            private var reads = 0
+            func now() -> Date {
+                lock.lock(); defer { lock.unlock() }
+                reads += 1
+                return Date(timeIntervalSince1970: 1_700_000_000 + Double(reads - 1))
+            }
+        }
+        let ticking = Ticking()
+        let v = try verification(now: { ticking.now() })
+        // At the first read (…000) nbf …000.5 is still in the future; a second read (…001) would let it pass.
+        expectError(.notYetValid, v, nbfToken("1700000000.5"))
+    }
+
     @Test func nbfIsOptionalAndMayBeNowOrEarlier() throws {
         let v = try verification(now: { Self.clock })
         for nbf in [nil, "1700000000", "1699999999", "1700000000.0"] {

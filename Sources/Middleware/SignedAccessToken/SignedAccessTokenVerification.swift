@@ -91,15 +91,18 @@ public struct SignedAccessTokenVerification: Sendable {
         }
         guard audiences.contains(trust.audience) else { throw .wrongAudience }
 
-        guard let exp = (claims["exp"] as? NSNumber)?.doubleValue else { throw .missingClaim("exp") }
+        // One reading of the clock for every time claim.
+        let instant = now()
+        guard let expClaim = claims["exp"] else { throw .missingClaim("exp") }
+        guard let exp = jsonNumber(expClaim) else { throw .invalidClaim("exp") }
         let expiresAt = Date(timeIntervalSince1970: exp)
-        guard expiresAt > now() else { throw .expired }
+        guard expiresAt > instant else { throw .expired }
 
         // `nbf` is optional; when present it must be a JSON number (a boolean is not one) no later than now.
         // No leeway, like `exp`.
         if let nbfClaim = claims["nbf"] {
             guard let nbf = jsonNumber(nbfClaim) else { throw .invalidClaim("nbf") }
-            guard Date(timeIntervalSince1970: nbf) <= now() else { throw .notYetValid }
+            guard Date(timeIntervalSince1970: nbf) <= instant else { throw .notYetValid }
         }
 
         guard let sub = nonBlank(claims["sub"] as? String) else { throw .missingClaim("sub") }
