@@ -102,7 +102,7 @@ extension AccessTokenVerification {
     /// consulted when `operatorId` is absent. When `operatorId` is present it wins outright —
     /// a conflicting `userId` is ignored, not rejected. Returns `nil` when neither header is set.
     public static func operatorId(fromHeaders headers: HTTPFields) -> String? {
-        if let key = HTTPField.Name("operatorId"), let value = headers.first(where: { $0.name == key })?.value {
+        if let value = headers.first(where: { $0.name == CallerHeaders.operatorId })?.value {
             return value
         }
         if let key = HTTPField.Name("userId"), let value = headers.first(where: { $0.name == key })?.value {

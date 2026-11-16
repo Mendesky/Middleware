@@ -43,16 +43,7 @@ private struct HTTPPermissionsProvider: PermissionsProvider {
 
 // MARK: - token plumbing (one EC key for both encrypt + decrypt)
 
-private let recipientKey: JWK = P256.KeyAgreement.PrivateKey().jwkRepresentation
-
-private func makeVerification() -> AccessTokenVerification { AccessTokenVerification(recipientKey: recipientKey)! }
-
-private func makeToken(userId: String) throws -> String {
-    let payload = AccessTokenPayload(authorizationId: "a", userId: userId, clientId: "c", scope: [], expiresAt: Date(timeIntervalSinceNow: 3600))
-    let data = try JSONEncoder().encode(payload)
-    let jwe = try JWE(payload: data, keyManagementAlg: .ecdhESA256KW, encryptionAlgorithm: .a256GCM, recipientKey: recipientKey)
-    return jwe.compactSerialization
-}
+private func makeVerification() -> AccessTokenVerification { AccessTokenVerification(recipientKey: testRecipientKey)! }
 
 private func bearer(_ token: String) -> HTTPFields {
     var headers = HTTPFields()
@@ -115,7 +106,7 @@ private func makeApp(baseURL: String, requiring required: [String]) throws -> so
         let required = try #require(perms.first, "seeded user should have at least one permission")
 
         let app = try makeApp(baseURL: base, requiring: [required])
-        let token = try makeToken(userId: userId)
+        let token = try jweUserToken(userId: userId)
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/quotations/1", method: .get, headers: bearer(token))
             #expect(res.status == .ok)
@@ -128,7 +119,7 @@ private func makeApp(baseURL: String, requiring required: [String]) throws -> so
         let userId = "ghost-\(UUID().uuidString.prefix(8))"  // never seeded -> IAM 404 -> [] -> denied
 
         let app = try makeApp(baseURL: base, requiring: ["any:permission"])  // ghost has none -> 403
-        let token = try makeToken(userId: userId)
+        let token = try jweUserToken(userId: userId)
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/quotations/1", method: .get, headers: bearer(token))
             #expect(res.status == .forbidden)

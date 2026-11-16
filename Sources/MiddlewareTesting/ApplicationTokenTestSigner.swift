@@ -1,8 +1,7 @@
 import Foundation
 import _CryptoExtras
-import JSONWebAlgorithms
 import JSONWebKey
-import JSONWebSignature
+import Middleware
 
 /// Mints RS256 `at+jwt` application tokens for tests, the way OIDCContext would.
 /// Each instance owns a fresh RSA-2048 key.
@@ -12,7 +11,7 @@ public struct ApplicationTokenTestSigner: Sendable {
 
     private let kid: String
     private let issuer: String
-    private let privateJWK: JWK
+    private let privateKey: _RSA.Signing.PrivateKey
     public let publicKey: JWK
 
     public init(kid: String = "app-test-1", issuer: String = defaultIssuer) {
@@ -20,18 +19,15 @@ public struct ApplicationTokenTestSigner: Sendable {
         self.issuer = issuer
         // swiftlint:disable:next force_try
         let key = try! _RSA.Signing.PrivateKey(keySize: .bits2048)
-        // jose-swift parses the PKCS#8 PEM into a JWK carrying the private parts.
+        self.privateKey = key
+        // jose-swift parses the PKCS#8 PEM into a JWK; only its public n/e are kept.
         // swiftlint:disable:next force_try
-        var full = try! JWK(pem: key.pkcs8PEMRepresentation)
-        full.keyID = kid
-        full.algorithm = "RS256"
-        // p/q are dropped: jose-swift rejects the primes it parsed itself; n/e/d sign fine.
-        full.p = nil; full.q = nil; full.dp = nil; full.dq = nil; full.qi = nil
-        self.privateJWK = full
+        let full = try! JWK(pem: key.pkcs8PEMRepresentation)
         self.publicKey = JWK(keyType: .rsa, algorithm: "RS256", keyID: kid, e: full.e, n: full.n)
     }
 
-    /// Base64 of a JWK Set JSON holding these signers' public keys (the `MENDESKY_APP_TOKEN_JWKS` format).
+    /// Base64 of a JWK Set JSON holding these signers' public keys (just the `keys` array of one issuer's trust entry,
+    /// not a full `MENDESKY_ACCESS_TOKEN_TRUST`; use `trustBase64(audience:issuers:)` for that).
     public static func keySetBase64(_ signers: [ApplicationTokenTestSigner]) -> String {
         struct Set: Encodable { let keys: [JWK] }
         // swiftlint:disable:next force_try
@@ -39,8 +35,38 @@ public struct ApplicationTokenTestSigner: Sendable {
         return data.base64EncodedString()
     }
 
-    /// `nil` for `clientId`/`scope`/`audience`/`typ` omits that field; `kid: .some(nil)` omits the header `kid`,
-    /// `.none` uses the signer's own. `audienceAsString` emits `aud` as a bare string (first entry) instead of an array.
+    /// This signer as a trusted issuer: its own issuer and public key, with the given caller types and actors.
+    public func trustedIssuer(callerTypes: Set<CallerType>, actors: [String] = []) -> TrustedIssuer {
+        TrustedIssuer(issuer: issuer, callerTypes: callerTypes, actors: actors, publicKeys: [publicKey])
+    }
+
+    /// Base64 of the trust configuration JSON (the `MENDESKY_ACCESS_TOKEN_TRUST` format), `callerTypes` sorted.
+    public static func trustBase64(audience: String = defaultAudience, issuers: [TrustedIssuer]) -> String {
+        struct KeySet: Encodable { let keys: [JWK] }
+        struct Entry: Encodable {
+            let issuer: String
+            let callerTypes: [String]
+            let actors: [String]
+            let keys: KeySet
+        }
+        struct Document: Encodable {
+            let audience: String
+            let issuers: [Entry]
+        }
+        let document = Document(audience: audience, issuers: issuers.map {
+            Entry(
+                issuer: $0.issuer, callerTypes: $0.callerTypes.map(\.rawValue).sorted(), actors: $0.actors,
+                keys: KeySet(keys: $0.publicKeys)
+            )
+        })
+        // swiftlint:disable:next force_try
+        return try! JSONEncoder().encode(document).base64EncodedString()
+    }
+
+    /// `nil` for `clientId`/`scope`/`audience`/`typ`/`subType` omits that field; `kid: .some(nil)` omits the header
+    /// `kid`, `.none` uses the signer's own. `audienceAsString` emits `aud` as a bare string (first entry) instead of
+    /// an array. `actors` builds a nested `act` claim, outermost first (`["a", "b"]` gives
+    /// `{"sub": "a", "act": {"sub": "b"}}`); empty omits `act`.
     public func token(
         sub: String,
         clientId: String? = "client-1",
@@ -50,7 +76,9 @@ public struct ApplicationTokenTestSigner: Sendable {
         typ: String? = "at+jwt",
         kid kidOverride: String?? = .none,
         issuer issuerOverride: String? = nil,
-        audienceAsString: Bool = false
+        audienceAsString: Bool = false,
+        subType: String? = "application",
+        actors: [String] = []
     ) -> String {
         var header: [String: Any] = ["alg": "RS256"]
         if let typ { header["typ"] = typ }
@@ -71,27 +99,47 @@ public struct ApplicationTokenTestSigner: Sendable {
         if let clientId { claims["client_id"] = clientId }
         if let scope { claims["scope"] = scope }
         if let audience { claims["aud"] = audienceAsString ? audience.first as Any : audience }
+        if let subType { claims["sub_type"] = subType }
+        let act = actors.reversed().reduce(nil as [String: Any]?) { inner, actor in
+            var level: [String: Any] = ["sub": actor]
+            if let inner { level["act"] = inner }
+            return level
+        }
+        if let act { claims["act"] = act }
 
         // swiftlint:disable:next force_try
-        let jws = try! JWS(
-            payload: JSONSerialization.data(withJSONObject: claims),
-            protectedHeaderData: JSONSerialization.data(withJSONObject: header),
-            key: privateJWK
-        )
-        return jws.compactSerialization
+        let headerData = try! JSONSerialization.data(withJSONObject: header)
+        // swiftlint:disable:next force_try
+        let payloadData = try! JSONSerialization.data(withJSONObject: claims)
+        return signed(header: headerData, payload: payloadData)
     }
 
     /// Signs `<base64url(headerJSON)>.<base64url(payloadJSON)>` with this signer's key (RS256) without any header
     /// validation, so tests can craft hostile headers (duplicate `alg`, odd `typ`, ...).
     public func rawToken(headerJSON: String, payloadJSON: String) -> String {
-        func b64(_ data: Data) -> String {
-            data.base64EncodedString()
-                .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
-                .replacingOccurrences(of: "=", with: "")
-        }
-        let input = "\(b64(Data(headerJSON.utf8))).\(b64(Data(payloadJSON.utf8)))"
+        signed(header: Data(headerJSON.utf8), payload: Data(payloadJSON.utf8))
+    }
+
+    /// Like `rawToken(headerJSON:payloadJSON:)`, over arbitrary bytes (e.g. JSON in another text encoding).
+    public func rawToken(headerData: Data, payloadData: Data) -> String {
+        signed(header: headerData, payload: payloadData)
+    }
+
+    /// Compact RS256 JWS over the given header and payload bytes. Signs with the BoringSSL-backed `_RSA` key
+    /// (RSASSA-PKCS1-v1_5 over SHA-256, i.e. RS256): jose-swift's pure-Swift RS256 signer is far too slow for tests.
+    private func signed(header: Data, payload: Data) -> String {
+        let input = "\(Self.base64URL(header)).\(Self.base64URL(payload))"
         // swiftlint:disable:next force_try
-        let signature = try! SigningAlgorithm.RS256.cryptoSigner!.sign(data: Data(input.utf8), key: privateJWK)
-        return "\(input).\(b64(signature))"
+        let signature = try! privateKey.signature(for: Data(input.utf8), padding: .insecurePKCS1v1_5)
+        return "\(input).\(Self.base64URL(signature.rawRepresentation))"
+    }
+
+    private static func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
+
+/// The signer for first-party (IdentityContext) tokens in service tests; same type, a less misleading name.
+public typealias AccessTokenTestSigner = ApplicationTokenTestSigner
