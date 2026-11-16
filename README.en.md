@@ -83,7 +83,7 @@ Behavior & status codes:
 | JWE: no `applicationId` | pass; the request passed on gets `applicationId: mendesky-first-party` |
 | Unexpected error during token verification | `401` |
 
-> Whitelisting uses `PathValidator` (below); matching paths skip authentication. `OPTIONS` is always skipped (for CORS preflight).
+> Whitelisting uses `PathValidator` (below); matching paths skip authentication. `OPTIONS` is always skipped (for CORS preflight). `PathValidator` normalizes the path the way Hummingbird's router splits it (empty segments dropped) before matching, so `/health/` and `//health` are the same path as `/health`.
 
 ### Caller headers: `operatorId` and `applicationId`
 

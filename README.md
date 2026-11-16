@@ -83,7 +83,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | JWE：沒帶 `applicationId` | 放行，傳下去的請求補上 `applicationId: mendesky-first-party` |
 | 驗證本身出錯（token 驗證流程的非預期錯誤）| `401` |
 
-> 白名單用 `PathValidator`（見下方），符合的路徑會跳過認證；`OPTIONS` 一律跳過（給 CORS preflight）。
+> 白名單用 `PathValidator`（見下方），符合的路徑會跳過認證；`OPTIONS` 一律跳過（給 CORS preflight）。`PathValidator` 比對前會先照 Hummingbird router 的切法正規化路徑（去掉空 segment），所以 `/health/`、`//health` 與 `/health` 視為同一條路徑。
 
 ### 呼叫者 header：`operatorId` 與 `applicationId`
 
