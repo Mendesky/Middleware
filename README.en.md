@@ -79,7 +79,7 @@ Behavior & status codes:
 | JWE decrypt failed / token expired | `401` |
 | JWE: no `operatorId` (or deprecated `userId`) header | `400` |
 | JWE: `operatorId` / `userId` header ≠ userId inside token | `400` (ensures the headers agree with the token; a caller cannot name someone else) |
-| JWE: repeated `operatorId` header; or no `operatorId` and a repeated `userId` | `400` |
+| JWE: repeated `operatorId` header; or repeated `userId` header (even with `operatorId` present); or `operatorId` ≠ `userId` when both are sent | `400` |
 | JWE: `applicationId` header present but ≠ `mendesky-first-party`, or repeated | `400` |
 | JWE: no `applicationId` | pass; the request passed on gets `applicationId: mendesky-first-party` |
 | Unexpected error during token verification | `401` |
@@ -96,7 +96,8 @@ After the route admission check, the middleware compares two headers (names in `
 | `.delegatedUser` | required, = `sub` | required, = the actor (`act.sub`, e.g. `mendesky-mcp-server`) |
 | `.application` | required, = the applicationId | required, = the applicationId |
 
-- The deprecated `userId` header is read only when `operatorId` is absent (when `operatorId` is present a repeated `userId` is ignored; with no `operatorId`, a repeated `userId` → `400`); a repeated `operatorId` is always `400`; `userId` **never** stands in for `applicationId`.
+- `operatorId` and the deprecated `userId` header must agree: either one repeated → `400` (whether or not the other is present); both present → they must be byte-identical, else `400` (handlers read `userId` as the operator, so a disagreeing pair would let a caller record events as someone else); only one present → that value is compared with the token. `userId` **never** stands in for `applicationId`.
+- Identifiers (`operatorId`, `userId`, `applicationId`) are compared **by UTF-8 bytes**, not Unicode canonical equivalence: `é` as U+00E9 and as `e` + U+0301 are different (→ `400`).
 - An `.application`'s applicationId is the token `sub` lowercased, so headers must carry the lowercase form (an uppercase UUID → `400`); what a handler reads from the header always equals `Caller.current`.
 - An `.application`'s `operatorId` is its applicationId today; it will later become the application's bound service account.
 - Whitelisted paths and `OPTIONS` are not checked and get no header added.
@@ -109,7 +110,7 @@ Besides user JWE tokens, `BearerTokenAuthenticationMiddleware` accepts **signed 
 - **application**: an external system using OAuth `client_credentials`, with **no user account** (`sub_type: application`, `sub` is the applicationId, exposed lowercased); the route must opt in explicitly.
 - **delegatedUser**: a user's token held by an actor such as an MCP server (`sub_type: user` with an `act` claim, RFC 8693); the route must opt in explicitly.
 
-Claims: `iss`, `aud` (`mendesky-services`, string or array), `sub`, `sub_type`, `client_id`, `scope` (space-delimited; may be an empty string but must be present), `exp`; `nbf` is optional, but when present it must be a JSON number (a boolean or string is not one) no later than now (no clock-skew leeway, like `exp`), otherwise `401`. The issuer always sets `iat` and `jti`, but Middleware neither requires nor checks them.
+Claims: `iss`, `aud` (`mendesky-services`, string or array), `sub`, `sub_type`, `client_id`, `scope` (space-delimited; may be an empty string but must be present), `exp` (must be a JSON number: `"exp": true` → `401`, not read as 1); `nbf` is optional, but when present it must be a JSON number (a boolean or string is not one) no later than now (no clock-skew leeway, like `exp`), otherwise `401`. The issuer always sets `iat` and `jti`, but Middleware neither requires nor checks them.
 
 #### Trust configuration
 
@@ -143,7 +144,7 @@ Claims: `iss`, `aud` (`mendesky-services`, string or array), `sub`, `sub_type`, 
   - an issuer allowed `delegatedUser` with an empty `actors`;
   - a duplicate `issuer`, or the same `kid` twice (within one issuer or across issuers);
   - a key that is not `kty=RSA`, lacks `n` or `e`, has an `alg` other than `RS256`, has a modulus under 2048 bits, or carries private fields (`d`, `p`, `q`, `dp`, `dq`, `qi`).
-- ⚠️ `MENDESKY_APP_TOKEN_*` was renamed to the two variables above; setting any old variable fails startup (the error names the variable to use instead).
+- ⚠️ `MENDESKY_APP_TOKEN_*` was renamed to the two variables above; setting any old variable fails startup (the error names the variable to use instead). This applies only to the environment-reading entry points: Bearer's `init(validators:)`, `init(validators:accepting:)`, `init(validators:acceptsApplication:)` and `AccessTokenTrust.fromEnvironment(_:)`; the explicit inits (`init(verification:trust:…)` and the like) never read the environment.
 - `init(verification:validators:)` **never reads** `MENDESKY_ACCESS_TOKEN_TRUST`: with that init, at+jwt is not accepted even if the variable is set, and nothing is logged about it. To enable at+jwt use `init(validators:)`, `init(validators:accepting:)`, or the init that takes `trust:` explicitly.
 - Every init that reads the environment (`init(validators:)`, `init(validators:accepting:)`, `init(validators:acceptsApplication:)`) logs notice lines at startup: `Signed access tokens enabled: ...` (audience, plus each issuer's callerTypes, actors and kids) or `Signed access tokens disabled: ...`, and `Legacy JWE mode: accept|warn|reject`.
 
@@ -170,6 +171,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
         // delegated user tokens: scope must contain quote:read exactly, actor restricted
         .delegatedUser(
             PathValidator("/quoting-context/drafts"),
+            methods: [.get],
             requiresScope: "quote:read",
             actors: ["mendesky-mcp-server"]
         ),
@@ -177,6 +179,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 ))
 ```
 
+- `methods:` limits the methods a `RouteAcceptance` opens (`nil` = any method): without it a `quote:read` holder could also `POST` the route. A `HEAD` request matches an entry whose `methods` include `GET`.
 - First-party users (JWE or at+jwt) need no opt-in; every route accepts them.
 - `.application` and `.delegatedUser` must both send `operatorId` and `applicationId`; see "Caller headers" above.
 - When a route matches several `RouteAcceptance` entries they combine as a **union (OR)**: any one admitting is enough. Adding a broader entry later (e.g. without an actor restriction) silently widens an existing actor-restricted one.
@@ -192,12 +195,14 @@ Behavior and status codes (at+jwt rows; the rest as in the table above):
 | Token with neither 3 nor 5 segments | `401` |
 | Route not open to that caller (or actor not allowed by the route) | `401` |
 | `.delegatedUser`: route open and actor allowed, but scope lacks `requiresScope` | `403` (body `insufficient scope.`) |
-| `.user` and `.delegatedUser`: `operatorId` missing or ≠ `sub` | `400` (the `userId` header is a deprecated fallback) |
-| `.application`: `operatorId` missing or ≠ the applicationId (lowercase) | `400` (the `userId` header is a deprecated fallback) |
+| `.user` and `.delegatedUser`: `operatorId` missing or ≠ `sub` | `400` (the deprecated `userId` header may stand in for it, but when both are sent they must be identical) |
+| `.application`: `operatorId` missing or ≠ the applicationId (lowercase) | `400` (a present `userId` must equal it too) |
 | `.delegatedUser`: `applicationId` missing or ≠ the actor (`act.sub`) | `400` |
 | `.application`: `applicationId` missing or ≠ the applicationId (lowercase) | `400` |
 | `.user`: `applicationId` present but ≠ `mendesky-first-party`; or a repeated `applicationId` for any identity | `400` |
-| Any identity: repeated `operatorId`; or no `operatorId` and a repeated `userId` (`userId` is ignored when `operatorId` is present) | `400` |
+| Any identity: repeated `operatorId`; repeated `userId` (even with `operatorId` present); or `operatorId` and `userId` both present but not byte-identical | `400` |
+| Any identity: `operatorId` / `userId` / `applicationId` equal to the expected value only under Unicode canonical equivalence (NFC vs NFD) | `400` (byte-exact comparison) |
+| at+jwt: `exp` missing or not a JSON number (a boolean is not one), or already past | `401` |
 | at+jwt: `nbf` not a JSON number, or later than now | `401` |
 | 5-segment token with `MENDESKY_LEGACY_JWE=reject` | `401` |
 
@@ -249,6 +254,10 @@ PermissionRule(
     requires: [String]                          // required permissions (AND — all must be present)
 )
 ```
+
+A `HEAD` request matches a rule whose `methods` include `GET` (a rule with `methods: nil` matches every method).
+
+> ⚠️ **Do not enable Hummingbird's `RouterOptions.caseInsensitive` or `.autoGenerateHeadEndpoints` in a service using this package** (both are off by default). `PermissionRule` and `RouteAcceptance` match the request path as written (case-sensitively); with `caseInsensitive` a different-case path (`/Quotations/1`) would reach the handler without matching any rule, and with `autoGenerateHeadEndpoints` a `HEAD` request is routed to the `GET` handler (this package only widens method matching for `HEAD` vs `GET` rules).
 
 ### `PermissionsProvider` (port)
 

@@ -79,7 +79,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | JWE 解密失敗 / token 過期 | `401` |
 | JWE：沒帶 `operatorId`（或 deprecated 的 `userId`）header | `400` |
 | JWE：`operatorId` / `userId` header ≠ token 內 userId | `400`（確保 header 與 token 一致、不能指定別人）|
-| JWE：重複的 `operatorId` header；或沒有 `operatorId` 而 `userId` 重複 | `400` |
+| JWE：重複的 `operatorId` header；或重複的 `userId` header（即使有帶 `operatorId`）；或兩者都帶但 `operatorId` ≠ `userId` | `400` |
 | JWE：`applicationId` header 有帶但 ≠ `mendesky-first-party`，或重複 | `400` |
 | JWE：沒帶 `applicationId` | 放行，傳下去的請求補上 `applicationId: mendesky-first-party` |
 | 驗證本身出錯（token 驗證流程的非預期錯誤）| `401` |
@@ -96,7 +96,8 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | `.delegatedUser` | 必帶，= `sub` | 必帶，= actor（`act.sub`，例如 `mendesky-mcp-server`）|
 | `.application` | 必帶，= applicationId | 必帶，= applicationId |
 
-- `operatorId` 缺少時才讀 deprecated 的 `userId` header（`operatorId` 存在時，重複的 `userId` 直接忽略；沒有 `operatorId` 時，重複的 `userId` 回 `400`）；重複的 `operatorId` 一律回 `400`；`userId` **永遠不能**代替 `applicationId`。
+- `operatorId` 與 deprecated 的 `userId` header 必須一致：任何一個重複就回 `400`（不論另一個有沒有帶）；兩個都帶時必須逐位元組相同，否則回 `400`（handler 會把 `userId` 當成操作者，兩者不一致會讓呼叫者以別人的名義寫入事件）；只帶一個時，用那個值與 token 比對。`userId` **永遠不能**代替 `applicationId`。
+- 識別碼（`operatorId`、`userId`、`applicationId`）以 **UTF-8 位元組**逐一比對，不採 Unicode 正規等價：`é` 寫成 U+00E9 與寫成 `e` + U+0301 視為不同（回 `400`）。
 - `.application` 的 applicationId 是 token `sub` 轉小寫後的值，header 必須帶小寫（帶大寫 UUID 會 `400`），所以 handler 從 header 讀到的值一定等於 `Caller.current`。
 - `.application` 的 `operatorId` 目前等於 applicationId；之後會改為該 application 綁定的 service account。
 - 白名單路徑與 `OPTIONS` 不檢查、也不補 header。
@@ -109,7 +110,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 - **application**：外部系統用 OAuth `client_credentials` 取得，**沒有使用者帳號**（`sub_type: application`，`sub` 為 applicationId，對外以小寫呈現），路由必須明確開放。
 - **delegatedUser**：使用者的 token 由代理者（actor，例如 MCP server）持有（`sub_type: user` 且帶 `act`，RFC 8693），路由必須明確開放。
 
-claims：`iss`、`aud`（`mendesky-services`，字串或陣列皆可）、`sub`、`sub_type`、`client_id`、`scope`（空白分隔，可為空字串但必須存在）、`exp`；`nbf` 可有可無，有的話必須是 JSON 數字（布林、字串都不算）且不晚於現在（和 `exp` 一樣不留時鐘誤差），否則回 `401`。發行者一律會設 `iat`、`jti`，但 Middleware 不要求也不檢查它們。
+claims：`iss`、`aud`（`mendesky-services`，字串或陣列皆可）、`sub`、`sub_type`、`client_id`、`scope`（空白分隔，可為空字串但必須存在）、`exp`（必須是 JSON 數字：`"exp": true` 回 `401`，不會被當成 1）；`nbf` 可有可無，有的話必須是 JSON 數字（布林、字串都不算）且不晚於現在（和 `exp` 一樣不留時鐘誤差），否則回 `401`。發行者一律會設 `iat`、`jti`，但 Middleware 不要求也不檢查它們。
 
 #### 信任設定
 
@@ -143,7 +144,7 @@ claims：`iss`、`aud`（`mendesky-services`，字串或陣列皆可）、`sub`�
   - 允許 `delegatedUser` 的發行者，`actors` 不可為空；
   - `issuer` 不可重複；同一個 `kid` 不可出現兩次（同一發行者內或跨發行者）；
   - 金鑰必須是 `kty=RSA`、有 `n` 與 `e`、`alg` 不存在或為 `RS256`、模數至少 2048 bit，且不可含私鑰欄位（`d`、`p`、`q`、`dp`、`dq`、`qi`）。
-- ⚠️ `MENDESKY_APP_TOKEN_*` 已改名為上面兩個變數；舊變數只要設了任何一個就會啟動失敗（錯誤訊息指出要改用哪個變數）。
+- ⚠️ `MENDESKY_APP_TOKEN_*` 已改名為上面兩個變數；舊變數只要設了任何一個就會啟動失敗（錯誤訊息指出要改用哪個變數）。這只適用於會讀環境變數的入口：Bearer 的 `init(validators:)`、`init(validators:accepting:)`、`init(validators:acceptsApplication:)` 與 `AccessTokenTrust.fromEnvironment(_:)`；明確傳入參數的 init（`init(verification:trust:…)` 等）完全不讀環境變數。
 - `init(verification:validators:)` **永遠不讀** `MENDESKY_ACCESS_TOKEN_TRUST`：用這個 init 時，即使環境變數有設，at+jwt 也不會被接受，也不會有任何 log 提示。要啟用 at+jwt，請用 `init(validators:)`、`init(validators:accepting:)`，或明確傳入 `trust:` 的 init。
 - 會讀環境變數的 init（`init(validators:)`、`init(validators:accepting:)`、`init(validators:acceptsApplication:)`）啟動時都會寫 notice log：`Signed access tokens enabled: ...`（列出 audience 與各發行者的 callerTypes、actors、kid）或 `Signed access tokens disabled: ...`，以及 `Legacy JWE mode: accept|warn|reject`。
 
@@ -170,6 +171,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
         // 代理使用者 token：scope 必須「剛好」含 quote:read，且 actor 限定
         .delegatedUser(
             PathValidator("/quoting-context/drafts"),
+            methods: [.get],
             requiresScope: "quote:read",
             actors: ["mendesky-mcp-server"]
         ),
@@ -177,6 +179,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 ))
 ```
 
+- `methods:` 限定 `RouteAcceptance` 開放的 method（`nil` = 不限）：不寫的話，持有 `quote:read` 的呼叫者也能 `POST` 該路由。`HEAD` 請求會符合 `methods` 含 `GET` 的項目。
 - 第一方 user（JWE 或 at+jwt）不需要開放，所有路由都收。
 - `.application` 與 `.delegatedUser` 都必須帶 `operatorId` 與 `applicationId`，規則見上方「呼叫者 header」。
 - 同一條路由符合多個 `RouteAcceptance` 時是**聯集（OR）**：只要任一條放行就放行。之後再加一條較寬的規則（例如不限 actor），會靜默放寬原本有 actor 限定的那條。
@@ -192,12 +195,14 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | token 段數既不是 3 也不是 5 | `401` |
 | 路由沒開放該身分（或 actor 不符路由限定）| `401` |
 | `.delegatedUser`：路由開放且 actor 符合，但 scope 不含 `requiresScope` | `403`（body `insufficient scope.`）|
-| `.user` 與 `.delegatedUser`：沒帶 `operatorId` 或 ≠ `sub` | `400`（`userId` header 為 deprecated fallback）|
-| `.application`：沒帶 `operatorId` 或 ≠ applicationId（小寫）| `400`（`userId` header 為 deprecated fallback）|
+| `.user` 與 `.delegatedUser`：沒帶 `operatorId` 或 ≠ `sub` | `400`（deprecated 的 `userId` header 可代替，但兩者都帶時必須相同）|
+| `.application`：沒帶 `operatorId` 或 ≠ applicationId（小寫）| `400`（有帶的 `userId` 也必須等於它）|
 | `.delegatedUser`：沒帶 `applicationId` 或 ≠ actor（`act.sub`）| `400` |
 | `.application`：沒帶 `applicationId` 或 ≠ applicationId（小寫）| `400` |
 | `.user`：`applicationId` 有帶但 ≠ `mendesky-first-party`；或任何身分帶了重複的 `applicationId` | `400` |
-| 任何身分：重複的 `operatorId`；或沒有 `operatorId` 而 `userId` 重複（有 `operatorId` 時不看 `userId`）| `400` |
+| 任何身分：重複的 `operatorId`；重複的 `userId`（即使有帶 `operatorId`）；或 `operatorId` 與 `userId` 都帶但不是逐位元組相同 | `400` |
+| 任何身分：`operatorId` / `userId` / `applicationId` 只在 Unicode 正規等價（NFC 對 NFD）下才等於預期值 | `400`（逐位元組比對）|
+| at+jwt：`exp` 缺少或不是 JSON 數字（布林不算），或已過期 | `401` |
 | at+jwt：`nbf` 不是 JSON 數字，或晚於現在 | `401` |
 | 5 段 token 且 `MENDESKY_LEGACY_JWE=reject` | `401` |
 
@@ -249,6 +254,10 @@ PermissionRule(
     requires: [String]                          // 所需權限（AND，全部具備才放行）
 )
 ```
+
+`HEAD` 請求會符合 `methods` 含 `GET` 的規則（`methods: nil` 的規則本來就符合所有 method）。
+
+> ⚠️ **使用本套件的服務不可開啟 Hummingbird 的 `RouterOptions.caseInsensitive` 或 `.autoGenerateHeadEndpoints`**（兩者預設都是關的）。`PermissionRule` 與 `RouteAcceptance` 依請求路徑原樣（區分大小寫）比對；開了 `caseInsensitive`，大小寫不同的路徑（`/Quotations/1`）會到達 handler 卻不符合任何規則；開了 `autoGenerateHeadEndpoints`，`HEAD` 請求會被導到 `GET` handler（本套件只處理 `HEAD` 對 `GET` 規則的 method 比對）。
 
 ### `PermissionsProvider`（port）
 
