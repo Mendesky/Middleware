@@ -12,7 +12,11 @@ public enum AccessTokenError: Error, Equatable {
     case badSignature
     case wrongAudience
     case expired
+    /// `nbf` is later than now.
+    case notYetValid
     case missingClaim(String)
+    /// The claim is present but not of the type it must have (`nbf` that is not a JSON number).
+    case invalidClaim(String)
     /// `sub_type` is neither `user` nor `application`.
     case unsupportedSubjectType
     /// An `application` token carries `act`.
@@ -91,6 +95,13 @@ public struct SignedAccessTokenVerification: Sendable {
         let expiresAt = Date(timeIntervalSince1970: exp)
         guard expiresAt > now() else { throw .expired }
 
+        // `nbf` is optional; when present it must be a JSON number (a boolean is not one) no later than now.
+        // No leeway, like `exp`.
+        if let nbfClaim = claims["nbf"] {
+            guard let nbf = jsonNumber(nbfClaim) else { throw .invalidClaim("nbf") }
+            guard Date(timeIntervalSince1970: nbf) <= now() else { throw .notYetValid }
+        }
+
         guard let sub = nonBlank(claims["sub"] as? String) else { throw .missingClaim("sub") }
         guard let subType = nonBlank(claims["sub_type"] as? String) else { throw .missingClaim("sub_type") }
         guard let clientId = nonBlank(claims["client_id"] as? String) else { throw .missingClaim("client_id") }
@@ -130,6 +141,18 @@ public struct SignedAccessTokenVerification: Sendable {
             ))
         }
     }
+}
+
+/// The value of a JSON number. `JSONSerialization` also hands `true` and `false` back as `NSNumber`, so booleans
+/// are told apart and refused (a `true` would otherwise read as `1`).
+private func jsonNumber(_ value: Any) -> Double? {
+    guard let number = value as? NSNumber else { return nil }
+    #if canImport(Darwin)
+    if CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
+    #else
+    if String(cString: number.objCType) == "c" { return nil }
+    #endif
+    return number.doubleValue
 }
 
 /// Decodes a header or payload segment: strict base64url, then a JSON object. The bytes must be UTF-8 (RFC 7515 §4,

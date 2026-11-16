@@ -368,4 +368,43 @@ private func claimsJSON(exp: Int = 99999999999, extra: String = "") -> String {
         expectError(.malformed, v, "a.b.c.d.e")
         expectError(.malformed, v, "a.b")
     }
+
+    // MARK: nbf
+
+    private static let clock = Date(timeIntervalSince1970: 1_700_000_000)
+    private static let ocHeader = #"{"alg":"RS256","typ":"at+jwt","kid":"oc-1"}"#
+
+    private func nbfToken(_ nbf: String?) -> String {
+        oc.rawToken(headerJSON: Self.ocHeader, payloadJSON: claimsJSON(extra: nbf.map { #","nbf":\#($0)"# } ?? ""))
+    }
+
+    @Test func nbfIsOptionalAndMayBeNowOrEarlier() throws {
+        let v = try verification(now: { Self.clock })
+        for nbf in [nil, "1700000000", "1699999999", "1700000000.0"] {
+            let id = try v.verify(compactString: nbfToken(nbf))
+            guard case .application = id else { Issue.record("not application: \(id)"); return }
+        }
+    }
+
+    @Test func nbfInTheFutureIsRejected() throws {
+        let v = try verification(now: { Self.clock })
+        expectError(.notYetValid, v, nbfToken("1700000001"))
+        expectError(.notYetValid, v, nbfToken("1700000000.5"))
+    }
+
+    @Test func nbfThatIsNotANumberIsRejected() throws {
+        let v = try verification(now: { Self.clock })
+        for nbf in [#""1699999999""#, "true", "false", "null", "[]", #"{"a":1}"#] {
+            expectError(.invalidClaim("nbf"), v, nbfToken(nbf))
+        }
+    }
+
+    @Test func nbfAppliesToUserAndDelegatedUserTokensToo() throws {
+        let v = try verification(now: { Self.clock })
+        let icHeader = #"{"alg":"RS256","typ":"at+jwt","kid":"ic-1"}"#
+        let user = #"{"iss":"https://identity.test","aud":["\#(audience)"],"sub":"acc_1","sub_type":"user","client_id":"c","scope":"*","exp":99999999999,"nbf":1700000001}"#
+        expectError(.notYetValid, v, ic.rawToken(headerJSON: icHeader, payloadJSON: user))
+        let delegated = #"{"iss":"https://oidc.test","aud":["\#(audience)"],"sub":"acc_1","sub_type":"user","client_id":"mendesky-mcp-server","scope":"quote:read","exp":99999999999,"nbf":"x","act":{"sub":"mendesky-mcp-server"}}"#
+        expectError(.invalidClaim("nbf"), v, oc.rawToken(headerJSON: Self.ocHeader, payloadJSON: delegated))
+    }
 }

@@ -27,7 +27,9 @@ public enum ApplicationTokenError: Error, Equatable {
     case wrongIssuer
     case wrongAudience
     case expired
+    case notYetValid
     case missingClaim(String)
+    case invalidClaim(String)
 }
 
 public enum ApplicationTokenConfigurationError: Error, Equatable {
@@ -111,7 +113,9 @@ public struct ApplicationTokenVerification: Sendable {
         case .badSignature: .badSignature
         case .wrongAudience: .wrongAudience
         case .expired: .expired
+        case .notYetValid: .notYetValid
         case .missingClaim(let name): .missingClaim(name)
+        case .invalidClaim(let name): .invalidClaim(name)
         case .unsupportedSubjectType, .unexpectedActor, .callerTypeNotAllowed, .actorNotAllowed,
              .wildcardScopeInDelegatedToken:
             .wrongType
