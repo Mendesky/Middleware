@@ -244,6 +244,21 @@ private func applicationToken() -> String {
         }
     }
 
+    @Test func notYetValidTokenIs401AndNeverLogged() async throws {
+        let (logger, store) = CapturingLogHandler.logger()
+        let app = try makeApp(trust: configuredTrust(), logger: logger)
+        let future = Int(Date().timeIntervalSince1970) + 3600
+        let header = #"{"alg":"RS256","typ":"at+jwt","kid":"oc-1"}"#
+        let payload = #"{"iss":"https://oidc.test","aud":["\#(ApplicationTokenTestSigner.defaultAudience)"],"sub":"app-1","sub_type":"application","client_id":"c","scope":"notification:send","exp":\#(future + 3600),"nbf":\#(future)}"#
+        let token = oc.rawToken(headerJSON: header, payloadJSON: payload)
+        try await app.test(.router) { client in
+            let res = try await client.execute(uri: "/open", method: .get, headers: headers(token, operatorId: "app-1", applicationId: "app-1"))
+            #expect(res.status == .unauthorized)
+        }
+        #expect(store.all.contains("notYetValid"))
+        #expect(!store.all.contains(token))
+    }
+
     @Test func misconfiguredTrustRefusesToStart() {
         let env = ["MENDESKY_ACCESS_TOKEN_TRUST": ApplicationTokenTestSigner.trustBase64(issuers: [
             ic.trustedIssuer(callerTypes: [.user]), oc.trustedIssuer(callerTypes: [.user])])]

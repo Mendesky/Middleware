@@ -241,3 +241,131 @@ private func rawHeaders(_ token: String, _ pairs: [(String, String)]) -> HTTPFie
         }
     }
 }
+
+@Suite struct BearerRepeatedOperatorIdTests {
+    /// Every caller type with the headers that are right for it besides `operatorId`.
+    private func callers() throws -> [(name: String, token: String, operatorId: String, applicationId: String?)] {
+        [
+            ("jwe", try jweUserToken(userId: "u1"), "u1", nil),
+            ("at+jwt user", atJwtUser(), "acc_1", nil),
+            ("delegated", delegatedToken(), "acc_1", mcpActor),
+            ("application", applicationToken(), appId, appId),
+        ]
+    }
+
+    private func pairs(_ caller: (name: String, token: String, operatorId: String, applicationId: String?), _ first: [(String, String)]) -> HTTPFields {
+        rawHeaders(caller.token, first + (caller.applicationId.map { [("applicationId", $0)] } ?? []))
+    }
+
+    @Test func repeatedOperatorIdIsRefusedEvenWhenOneMatches() async throws {
+        let app = try makeApp()
+        try await app.test(.router) { client in
+            for c in try callers() {
+                for second in [c.operatorId, "other"] {
+                    let res = try await client.execute(
+                        uri: "/open", method: .get, headers: pairs(c, [("operatorId", c.operatorId), ("operatorId", second)]))
+                    #expect(res.status == .badRequest, "\(c.name) with second operatorId \(second)")
+                }
+            }
+        }
+    }
+
+    @Test func repeatedUserIdWithoutOperatorIdIsRefused() async throws {
+        let app = try makeApp()
+        try await app.test(.router) { client in
+            for c in try callers() {
+                let res = try await client.execute(
+                    uri: "/open", method: .get, headers: pairs(c, [("userId", c.operatorId), ("userId", c.operatorId)]))
+                #expect(res.status == .badRequest, "\(c.name)")
+            }
+        }
+    }
+
+    @Test func repeatedUserIdIsRefusedEvenWhenOperatorIdIsPresent() async throws {
+        let app = try makeApp()
+        try await app.test(.router) { client in
+            for c in try callers() {
+                for second in [c.operatorId, "other"] {
+                    let res = try await client.execute(
+                        uri: "/open", method: .get,
+                        headers: pairs(c, [("operatorId", c.operatorId), ("userId", c.operatorId), ("userId", second)]))
+                    #expect(res.status == .badRequest, "\(c.name) with second userId \(second)")
+                }
+            }
+        }
+    }
+
+    @Test func operatorIdAndUserIdThatDisagreeAreRefused() async throws {
+        let app = try makeApp()
+        try await app.test(.router) { client in
+            for c in try callers() {
+                // The operatorId is the token's subject; the userId names someone else (handlers read userId as the operator).
+                let res = try await client.execute(
+                    uri: "/open", method: .get, headers: pairs(c, [("operatorId", c.operatorId), ("userId", "B")]))
+                #expect(res.status == .badRequest, "\(c.name) operatorId=subject userId=B")
+                let swapped = try await client.execute(
+                    uri: "/open", method: .get, headers: pairs(c, [("operatorId", "A"), ("userId", c.operatorId)]))
+                #expect(swapped.status == .badRequest, "\(c.name) operatorId=A userId=subject")
+            }
+        }
+    }
+
+    @Test func operatorIdAndUserIdThatAgreeAreAccepted() async throws {
+        let app = try makeApp()
+        try await app.test(.router) { client in
+            for c in try callers() {
+                let res = try await client.execute(
+                    uri: "/open", method: .get,
+                    headers: pairs(c, [("operatorId", c.operatorId), ("userId", c.operatorId)]))
+                #expect(res.status == .ok, "\(c.name)")
+            }
+        }
+    }
+
+    @Test func operatorIdsAreComparedByUTF8BytesNotCanonicalEquivalence() async throws {
+        let nfc = "caf\u{e9}", nfd = "cafe\u{301}"
+        #expect(nfc == nfd && Array(nfc.utf8) != Array(nfd.utf8))
+        let app = try makeApp()
+        try await app.test(.router) { client in
+            let token = ic.token(sub: nfc, clientId: "mendesky-first-party", subType: "user")
+            let same = try await client.execute(uri: "/open", method: .get, headers: rawHeaders(token, [("operatorId", nfc)]))
+            #expect(same.status == .ok)
+            let operatorForm = try await client.execute(uri: "/open", method: .get, headers: rawHeaders(token, [("operatorId", nfd)]))
+            #expect(operatorForm.status == .badRequest)
+            let userIdForm = try await client.execute(uri: "/open", method: .get, headers: rawHeaders(token, [("userId", nfd)]))
+            #expect(userIdForm.status == .badRequest)
+            // Both present and canonically equivalent, but not byte-identical.
+            let pair = try await client.execute(
+                uri: "/open", method: .get, headers: rawHeaders(token, [("operatorId", nfc), ("userId", nfd)]))
+            #expect(pair.status == .badRequest)
+        }
+    }
+
+    @Test func applicationIdsAreComparedByUTF8BytesNotCanonicalEquivalence() async throws {
+        let nfc = "caf\u{e9}", nfd = "cafe\u{301}"
+        let app = try makeApp()
+        try await app.test(.router) { client in
+            let token = oc.token(sub: nfc, scope: "notification:send")
+            let same = try await client.execute(
+                uri: "/open", method: .get, headers: rawHeaders(token, [("operatorId", nfc), ("applicationId", nfc)]))
+            #expect(same.status == .ok)
+            let res = try await client.execute(
+                uri: "/open", method: .get, headers: rawHeaders(token, [("operatorId", nfc), ("applicationId", nfd)]))
+            #expect(res.status == .badRequest)
+        }
+    }
+
+    @Test func singleValuesBehaveAsBefore() async throws {
+        let app = try makeApp()
+        try await app.test(.router) { client in
+            for c in try callers() {
+                let viaOperatorId = try await client.execute(uri: "/open", method: .get, headers: pairs(c, [("operatorId", c.operatorId)]))
+                #expect(viaOperatorId.status == .ok, "\(c.name)")
+                let viaUserId = try await client.execute(uri: "/open", method: .get, headers: pairs(c, [("userId", c.operatorId)]))
+                #expect(viaUserId.status == .ok, "\(c.name)")
+                let wrong = try await client.execute(uri: "/open", method: .get, headers: pairs(c, [("operatorId", "other")]))
+                #expect(wrong.status == .badRequest, "\(c.name)")
+            }
+        }
+    }
+}

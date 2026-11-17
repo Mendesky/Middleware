@@ -26,7 +26,8 @@ public enum BearerTokenAuthenticationMiddlewareError: Error {
 ///
 /// Admitted callers must then assert who they are in the `CallerHeaders`, compared exactly (`400` otherwise):
 /// - `operatorId` (or the deprecated `userId` when `operatorId` is absent): the token's subject for `.user` and
-///   `.delegatedUser`, the application id for `.application`.
+///   `.delegatedUser`, the application id for `.application`. A repeated `operatorId` (or, when `operatorId` is
+///   absent, a repeated `userId`) is refused.
 /// - `applicationId`: the actor (`act.sub`) for `.delegatedUser`, the application id for `.application`. Optional
 ///   for `.user`: when absent, `applicationId: mendesky-first-party` is added to the request passed on; when present
 ///   it must be exactly that. A repeated `applicationId` header is refused.
@@ -211,9 +212,11 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
             return Self.response(.forbidden, "insufficient scope.")
         }
 
-        // Verify the caller-asserted identity headers match the token, so a stolen token cannot act as anyone else.
-        // `operatorId` is canonical; `userId` is the deprecated fallback (never for `applicationId`).
-        guard AccessTokenVerification.operatorId(fromHeaders: input.headers) == Self.expectedOperatorId(of: identity),
+        // Verify the caller-asserted identity headers agree with the token, so a caller cannot name someone else.
+        // `operatorId` is canonical, `userId` the deprecated alias (never for `applicationId`); when both are sent
+        // they must agree. Compared by UTF-8 bytes.
+        guard let operatorId = AccessTokenVerification.operatorId(fromHeaders: input.headers),
+              AccessTokenVerification.bytesEqual(operatorId, Self.expectedOperatorId(of: identity)),
               let request = Self.checkingApplicationId(of: identity, in: input)
         else {
             return Response(status: .badRequest)
@@ -321,7 +324,9 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
             head.headerFields.append(HTTPField(name: CallerHeaders.applicationId, value: CallerHeaders.firstPartyApplicationId))
             return Request(head: head, body: request.body)
         }
-        guard asserted == [expectedApplicationId(of: identity)] else { return nil }
+        guard asserted.count == 1,
+              AccessTokenVerification.bytesEqual(asserted[0], expectedApplicationId(of: identity))
+        else { return nil }
         return request
     }
 

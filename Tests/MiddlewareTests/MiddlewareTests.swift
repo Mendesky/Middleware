@@ -57,8 +57,8 @@ import HTTPTypes
         return fields
     }
 
-    @Test func prefersOperatorIdWhenPresent() {
-        let h = headers([("operatorId", "op-1"), ("userId", "user-1")])
+    @Test func operatorIdAndUserIdThatAgreeGiveThatValue() {
+        let h = headers([("operatorId", "op-1"), ("userId", "op-1")])
         #expect(AccessTokenVerification.operatorId(fromHeaders: h) == "op-1")
     }
 
@@ -67,10 +67,20 @@ import HTTPTypes
         #expect(AccessTokenVerification.operatorId(fromHeaders: h) == "user-1")
     }
 
-    @Test func operatorIdWinsEvenWhenUserIdDiffers() {
-        // operatorId is authoritative; a conflicting (deprecated) userId is ignored.
+    @Test func operatorIdAndUserIdThatDisagreeGiveNothing() {
+        // handlers read userId as the operator, so a conflicting one names no single operator.
         let h = headers([("operatorId", "op-1"), ("userId", "other")])
-        #expect(AccessTokenVerification.operatorId(fromHeaders: h) == "op-1")
+        #expect(AccessTokenVerification.operatorId(fromHeaders: h) == nil)
+        #expect(AccessTokenVerification.operatorId(fromHeaders: headers([("operatorId", "e\u{301}"), ("userId", "\u{e9}")])) == nil)
+    }
+
+    @Test func repeatedOperatorIdOrRepeatedFallbackUserIdIsNeverAValue() {
+        #expect(AccessTokenVerification.operatorId(fromHeaders: headers([("operatorId", "a"), ("operatorId", "a")])) == nil)
+        #expect(AccessTokenVerification.operatorId(fromHeaders: headers([("operatorId", "a"), ("operatorId", "b")])) == nil)
+        #expect(AccessTokenVerification.operatorId(fromHeaders: headers([("userId", "a"), ("userId", "a")])) == nil)
+        // a repeated userId is refused even when operatorId is present, and the other way round.
+        #expect(AccessTokenVerification.operatorId(fromHeaders: headers([("operatorId", "a"), ("userId", "a"), ("userId", "a")])) == nil)
+        #expect(AccessTokenVerification.operatorId(fromHeaders: headers([("operatorId", "a"), ("operatorId", "a"), ("userId", "a")])) == nil)
     }
 
     @Test func returnsNilWhenNeitherPresent() {
