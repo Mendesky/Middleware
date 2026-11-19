@@ -6,19 +6,13 @@ import FoundationNetworking
 import Hummingbird
 import HummingbirdTesting
 import HTTPTypes
-#if canImport(CryptoKit)
-import CryptoKit
-#else
-import Crypto
-#endif
-import JSONWebKey
-import JSONWebEncryption
-import JSONWebAlgorithms
+import Logging
+import MiddlewareTesting
 @testable import Middleware
 
 // Live end-to-end against a running IAMContext. Skipped unless IAM_BASE_URL is set, e.g.:
 //   IAM_BASE_URL=http://localhost:24202 swift test --filter LiveIAMIntegrationTests
-// Exercises the real chain: PermissionMiddleware -> HTTP PermissionsProvider -> IAMContext getPermissions.
+// Exercises the real chain: Bearer -> PermissionMiddleware -> HTTP PermissionsProvider -> IAMContext getPermissions.
 
 private enum LiveIAM {
     static var baseURL: String? { ProcessInfo.processInfo.environment["IAM_BASE_URL"] }
@@ -39,16 +33,6 @@ private struct HTTPPermissionsProvider: PermissionsProvider {
         default: throw URLError(.badServerResponse)
         }
     }
-}
-
-// MARK: - token plumbing (one EC key for both encrypt + decrypt)
-
-private func makeVerification() -> AccessTokenVerification { AccessTokenVerification(recipientKey: testRecipientKey)! }
-
-private func bearer(_ token: String) -> HTTPFields {
-    var headers = HTTPFields()
-    headers[.authorization] = "Bearer \(token)"
-    return headers
 }
 
 // MARK: - IAMContext seeding helpers
@@ -87,7 +71,9 @@ private func waitForPermissions(baseURL: String, userId: String) async throws ->
 private func makeApp(baseURL: String, requiring required: [String]) throws -> some ApplicationProtocol {
     let rule = PermissionRule(PathValidator(try Regex("/quotations/.+")), methods: [.get], requires: required)
     let router = Router()
-    router.add(middleware: PermissionMiddleware(rules: [rule], provider: HTTPPermissionsProvider(baseURL: baseURL), verification: makeVerification()))
+    router.add(middleware: BearerTokenAuthenticationMiddleware(
+        trust: try icOcTrust(), logger: Logger(label: "test") { _ in SwiftLogNoOpLogHandler() }))
+    router.add(middleware: try PermissionMiddleware(rules: [rule], provider: HTTPPermissionsProvider(baseURL: baseURL)))
     router.get("quotations/:id") { _, _ in "ok" }
     return Application(router: router)
 }
@@ -106,9 +92,9 @@ private func makeApp(baseURL: String, requiring required: [String]) throws -> so
         let required = try #require(perms.first, "seeded user should have at least one permission")
 
         let app = try makeApp(baseURL: base, requiring: [required])
-        let token = try jweUserToken(userId: userId)
+        let token = ic.token(sub: userId, clientId: "mendesky-first-party", subType: "user")
         try await app.test(.router) { client in
-            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: bearer(token))
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token, operatorId: userId))
             #expect(res.status == .ok)
         }
     }
@@ -119,9 +105,9 @@ private func makeApp(baseURL: String, requiring required: [String]) throws -> so
         let userId = "ghost-\(UUID().uuidString.prefix(8))"  // never seeded -> IAM 404 -> [] -> denied
 
         let app = try makeApp(baseURL: base, requiring: ["any:permission"])  // ghost has none -> 403
-        let token = try jweUserToken(userId: userId)
+        let token = ic.token(sub: userId, clientId: "mendesky-first-party", subType: "user")
         try await app.test(.router) { client in
-            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: bearer(token))
+            let res = try await client.execute(uri: "/quotations/1", method: .get, headers: headers(token, operatorId: userId))
             #expect(res.status == .forbidden)
         }
     }
