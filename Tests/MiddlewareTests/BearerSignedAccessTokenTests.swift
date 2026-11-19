@@ -7,10 +7,9 @@ import Logging
 import MiddlewareTesting
 @testable import Middleware
 
-private func makeApp(trust: AccessTokenTrust?, logger: Logger = Logger(label: "test") { _ in SwiftLogNoOpLogHandler() }) throws -> some ApplicationProtocol {
+private func makeApp(trust: AccessTokenTrust, logger: Logger = Logger(label: "test") { _ in SwiftLogNoOpLogHandler() }) throws -> some ApplicationProtocol {
     let router = Router()
     router.add(middleware: BearerTokenAuthenticationMiddleware(
-        verification: AccessTokenVerification(recipientKey: testRecipientKey)!,
         trust: trust,
         accepting: [
             .application(PathValidator("/open")),
@@ -48,27 +47,6 @@ private func applicationToken() -> String {
 }
 
 @Suite struct BearerSignedAccessTokenTests {
-    @Test func withoutTrustConfigBehaviourIsUnchanged() async throws {
-        let app = try makeApp(trust: nil)
-        let jwe = try jweUserToken(userId: "u1")
-        try await app.test(.router) { client in
-            let ok = try await client.execute(uri: "/closed", method: .get, headers: headers(jwe, operatorId: "u1"))
-            #expect(ok.status == .ok)
-            #expect(String(buffer: ok.body) == "user:u1:c")
-            let noOperator = try await client.execute(uri: "/closed", method: .get, headers: headers(jwe))
-            #expect(noOperator.status == .badRequest)
-            let signed = try await client.execute(
-                uri: "/open", method: .get, headers: headers(firstPartyUserToken(), operatorId: "acc_1"))
-            #expect(signed.status == .unauthorized)
-            let application = try await client.execute(uri: "/open", method: .get, headers: headers(applicationToken()))
-            #expect(application.status == .unauthorized)
-            let missing = try await client.execute(uri: "/closed", method: .get)
-            #expect(missing.status == .unauthorized)
-            let fourSegments = try await client.execute(uri: "/closed", method: .get, headers: headers("a.b.c.d"))
-            #expect(fourSegments.status == .unauthorized)
-        }
-    }
-
     @Test func firstPartyUserTokenPassesEveryRouteWithOperatorId() async throws {
         let app = try makeApp(trust: configuredTrust())
         let token = firstPartyUserToken()
@@ -104,22 +82,10 @@ private func applicationToken() -> String {
         }
     }
 
-    @Test func jweStillWorksWhenTrustIsConfigured() async throws {
-        let app = try makeApp(trust: configuredTrust())
-        let jwe = try jweUserToken(userId: "u1")
-        try await app.test(.router) { client in
-            let ok = try await client.execute(uri: "/closed", method: .get, headers: headers(jwe, operatorId: "u1"))
-            #expect(ok.status == .ok)
-            #expect(String(buffer: ok.body) == "user:u1:c")
-            let noOperator = try await client.execute(uri: "/closed", method: .get, headers: headers(jwe))
-            #expect(noOperator.status == .badRequest)
-        }
-    }
-
-    @Test func otherSegmentCountsAre401WhenTrustIsConfigured() async throws {
+    @Test func otherSegmentCountsAre401() async throws {
         let app = try makeApp(trust: configuredTrust())
         try await app.test(.router) { client in
-            for token in ["a.b", "a.b.c.d", "a.b.c.d.e.f"] {
+            for token in ["a.b", "a.b.c.d", "a.b.c.d.e", "a.b.c.d.e.f"] {
                 let res = try await client.execute(uri: "/open", method: .get, headers: headers(token, operatorId: "u1"))
                 #expect(res.status == .unauthorized)
             }
