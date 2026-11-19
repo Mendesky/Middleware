@@ -6,7 +6,7 @@ Shared [Hummingbird 2.x](https://github.com/hummingbird-project/hummingbird) mid
 
 Provides:
 
-- **Authentication**: bearer-token verification, JWE (legacy) or at+jwt (`BearerTokenAuthenticationMiddleware`)
+- **Authentication**: bearer-token verification, at+jwt only (`BearerTokenAuthenticationMiddleware`; legacy JWE was removed in 2.0, see "Migrating from 1.3 to 2.0")
 - **Signed access tokens (`at+jwt`)**: RS256 JWTs for first-party users, external systems (application) and delegated users; routes opt in (`RouteAcceptance`, `Caller`, `Scope`); a test signer lives in `MiddlewareTesting`
 - **Authorization**: endpoint-level RBAC (`PermissionMiddleware`, live lookups against IAMContext)
 - **CORS**: origin allowlist + preflight (`DynamicCORSMiddleware`)
@@ -23,7 +23,7 @@ Provides:
 `Package.swift`:
 
 ```swift
-.package(url: "git@github.com:Mendesky/Middleware.git", from: "1.0.0"),
+.package(url: "git@github.com:Mendesky/Middleware.git", from: "2.0.0"),
 // target dependency
 .product(name: "Middleware", package: "Middleware"),
 ```
@@ -39,7 +39,7 @@ swift test
 
 | Name | Kind | Role |
 |---|---|---|
-| `BearerTokenAuthenticationMiddleware` | server (`MiddlewareProtocol`) | Verify the Bearer token (JWE legacy or at+jwt), verify identity (who you are) |
+| `BearerTokenAuthenticationMiddleware` | server (`MiddlewareProtocol`) | Verify the Bearer token (at+jwt), verify identity (who you are) |
 | `PermissionMiddleware` | server (`MiddlewareProtocol`) | Endpoint permission check (what you may do) |
 | `DynamicCORSMiddleware<Context>` | server (`RouterMiddleware`) | Origin-allowlist CORS + preflight |
 | `LoggingMiddleware` | server (`MiddlewareProtocol`) | Debug-level request/response logging |
@@ -51,17 +51,11 @@ swift test
 
 ## Authentication: `BearerTokenAuthenticationMiddleware`
 
-Verifies `Authorization: Bearer <token>`: the token is a JWE (legacy, 5 segments) or an at+jwt (3 segments, below), and the `operatorId` (`userId` is the deprecated fallback) and `applicationId` headers are checked so that the headers agree with the token and a caller cannot name someone else (see "Caller headers" below).
+Verifies `Authorization: Bearer <token>`: the token must be an at+jwt (3 segments, see "Signed access tokens" below), and the `operatorId` (`userId` is the deprecated fallback) and `applicationId` headers are checked so that the headers agree with the token and a caller cannot name someone else (see "Caller headers" below).
 
-Keys are loaded from environment variables:
+The trust configuration (`MENDESKY_ACCESS_TOKEN_TRUST` or `MENDESKY_ACCESS_TOKEN_TRUST_PATH`, see "Trust configuration" below) is **required**: the environment-reading inits throw `BearerTokenAuthenticationMiddlewareError.accessTokenTrustNotConfigured` when neither is set (the service does not start). The init that reads no environment is `init(trust:validators:accepting:serviceName:logger:)`.
 
-| Environment variable | Required | Description |
-|---|---|---|
-| `MENDESKY_AUTH_RECIPIENT_JWK` or `..._JWK_PATH` | ✅ | Decryption private key (JWK JSON / base64, or a file path) |
-| `MENDESKY_AUTH_SENDER_JWK` or `..._JWK_PATH` | — (recommended in production) | Sender-authentication public key |
-| `MENDESKY_AUTH_PASSWORD` | — | JWK password (base64) |
-
-> ⚠️ **Set `MENDESKY_AUTH_SENDER_JWK` in production.** Without it the JWE has confidentiality only, not sender authentication — anyone holding the recipient **public** key can forge a token, and this middleware fully trusts the `userId` inside the token.
+> Since 2.0 a legacy JWE (5 segments) always gets `401`, and `MENDESKY_AUTH_*` and `MENDESKY_LEGACY_JWE` are no longer read; if any is still set, **one** warning naming the variables (never their values) is logged at startup. Remove them and delete the JWE private key.
 
 ```swift
 router.add(middleware: try BearerTokenAuthenticationMiddleware(
@@ -76,12 +70,11 @@ Behavior & status codes:
 | OPTIONS / whitelisted path | pass through (skipped) |
 | No `Authorization` header | `401` |
 | Not `Bearer <token>` format | `400` |
-| JWE decrypt failed / token expired | `401` |
-| JWE: no `operatorId` (or deprecated `userId`) header | `400` |
-| JWE: `operatorId` / `userId` header ≠ userId inside token | `400` (ensures the headers agree with the token; a caller cannot name someone else) |
-| JWE: repeated `operatorId` header; or repeated `userId` header (even with `operatorId` present); or `operatorId` ≠ `userId` when both are sent | `400` |
-| JWE: `applicationId` header present but ≠ `mendesky-first-party`, or repeated | `400` |
-| JWE: no `applicationId` | pass; the request passed on gets `applicationId: mendesky-first-party` |
+| Token verification failed / token expired | `401` (body `access token rejected.`) |
+| Legacy JWE (5-segment token) | `401` (body `access token rejected.`; never decrypted) |
+| No `operatorId` (or deprecated `userId`) header, or ≠ the userId in the token | `400` (ensures the headers agree with the token; a caller cannot name someone else) |
+| `.user`: `applicationId` header present but ≠ `mendesky-first-party`, or repeated | `400` |
+| `.user`: no `applicationId` | pass; the request passed on gets `applicationId: mendesky-first-party` |
 | Unexpected error during token verification | `401` |
 
 > Whitelisting uses `PathValidator` (below); matching paths skip authentication. `OPTIONS` is always skipped (for CORS preflight). `PathValidator` normalizes the path the way Hummingbird's router splits it (empty segments dropped) before matching, so `/health/` and `//health` are the same path as `/health`.
@@ -92,7 +85,7 @@ After the route admission check, the middleware compares two headers (names in `
 
 | Identity | `operatorId` | `applicationId` |
 |---|---|---|
-| `.user` (JWE or at+jwt) | required, = the userId in the token (`sub`), verbatim | optional. When absent the middleware adds `applicationId: mendesky-first-party` (`CallerHeaders.firstPartyApplicationId`) to the request it passes on; when present it must be exactly that |
+| `.user` | required, = the userId in the token (`sub`), verbatim | optional. When absent the middleware adds `applicationId: mendesky-first-party` (`CallerHeaders.firstPartyApplicationId`) to the request it passes on; when present it must be exactly that |
 | `.delegatedUser` | required, = `sub` | required, = the actor (`act.sub`, e.g. `mendesky-mcp-server`) |
 | `.application` | required, = the applicationId | required, = the applicationId |
 
@@ -104,9 +97,9 @@ After the route admission check, the middleware compares two headers (names in `
 
 ### Signed access tokens (`at+jwt`)
 
-Besides user JWE tokens, `BearerTokenAuthenticationMiddleware` accepts **signed access tokens**: RS256 JWTs (`typ: at+jwt` or `application/at+jwt`, with a `kid` header). There are three kinds of caller:
+`BearerTokenAuthenticationMiddleware` accepts **signed access tokens** only: RS256 JWTs (`typ: at+jwt` or `application/at+jwt`, with a `kid` header). There are three kinds of caller:
 
-- **user**: a first-party user (issued by IdentityContext, `sub_type: user`, no `act`), mapped to `.user`; accepted on every route, exactly like a JWE user.
+- **user**: a first-party user (issued by IdentityContext, `sub_type: user`, no `act`), mapped to `.user`; accepted on every route.
 - **application**: an external system using OAuth `client_credentials`, with **no user account** (`sub_type: application`, `sub` is the applicationId, exposed lowercased); the route must opt in explicitly.
 - **delegatedUser**: a user's token held by an actor such as an MCP server (`sub_type: user` with an `act` claim, RFC 8693); the route must opt in explicitly.
 
@@ -116,8 +109,8 @@ Claims: `iss`, `aud` (`mendesky-services`, string or array), `sub`, `sub_type`, 
 
 | Environment variable | Required | Description |
 |---|---|---|
-| `MENDESKY_ACCESS_TOKEN_TRUST_PATH` | — (neither set = at+jwt not accepted, JWE only) | Path of the trust configuration JSON file; wins when both are set |
-| `MENDESKY_ACCESS_TOKEN_TRUST` | — | Base64 of the trust configuration JSON |
+| `MENDESKY_ACCESS_TOKEN_TRUST_PATH` | ✅ one of the two (neither set = startup fails) | Path of the trust configuration JSON file; wins when both are set |
+| `MENDESKY_ACCESS_TOKEN_TRUST` | ✅ one of the two | Base64 of the trust configuration JSON |
 
 ```json
 {
@@ -144,21 +137,8 @@ Claims: `iss`, `aud` (`mendesky-services`, string or array), `sub`, `sub_type`, 
   - an issuer allowed `delegatedUser` with an empty `actors`;
   - a duplicate `issuer`, or the same `kid` twice (within one issuer or across issuers);
   - a key that is not `kty=RSA`, lacks `n` or `e`, has an `alg` other than `RS256`, has a modulus under 2048 bits, or carries private fields (`d`, `p`, `q`, `dp`, `dq`, `qi`).
-- ⚠️ `MENDESKY_APP_TOKEN_*` was renamed to the two variables above; setting any old variable fails startup (the error names the variable to use instead). This applies only to the environment-reading entry points: Bearer's `init(validators:)`, `init(validators:accepting:)`, `init(validators:acceptsApplication:)` and `AccessTokenTrust.fromEnvironment(_:)`; the explicit inits (`init(verification:trust:…)` and the like) never read the environment.
-- `init(verification:validators:)` **never reads** `MENDESKY_ACCESS_TOKEN_TRUST`: with that init, at+jwt is not accepted even if the variable is set, and nothing is logged about it. To enable at+jwt use `init(validators:)`, `init(validators:accepting:)`, or the init that takes `trust:` explicitly.
-- Every init that reads the environment (`init(validators:)`, `init(validators:accepting:)`, `init(validators:acceptsApplication:)`) logs notice lines at startup: `Signed access tokens enabled: ...` (audience, plus each issuer's callerTypes, actors and kids) or `Signed access tokens disabled: ...`, and `Legacy JWE mode: accept|warn|reject`.
-
-#### Legacy JWE switch: `MENDESKY_LEGACY_JWE`
-
-| Value | Behavior |
-|---|---|
-| `accept` (default; unset or blank) | JWE is decrypted as usual; each admitted request logs one `legacy-jwe-accepted` line (`.notice`) |
-| `warn` | Same, logged at `.warning` |
-| `reject` | 5-segment tokens are not decrypted; logs `legacy-jwe-rejected` (`.notice`) and answers `401` |
-
-Any other value fails startup. **Only** the environment-reading inits read this variable: Bearer's `init(validators:)`, `init(validators:accepting:)`, `init(validators:acceptsApplication:)`, and `PermissionMiddleware.init(rules:provider:)` (its JWE fallback, when no Bearer runs in front, honours the switch too). The explicit inits (Bearer's `init(verification:validators:)` and `init(verification:applicationTokens:validators:acceptsApplication:logger:)`, always `accept`; `init(verification:trust:legacyJWE:…)`, default `accept`; `PermissionMiddleware.init(rules:provider:verification:…)`) use the value passed (or `accept`) and **ignore** the variable. The `legacy-jwe-accepted` metadata holds only `clientId` (the clientId inside the JWE; empty for first-party), `route` (the route template such as `/items/{id}`, not the actual path; `unknown` if unavailable) and `service` (defaults to the process name, overridable via an init parameter); `legacy-jwe-rejected` holds only `route` and `service`. The logs **never contain the token or the userId**. With `PermissionMiddleware` placed before Bearer, one JWE is logged as `legacy-jwe-accepted` twice, and Permission also logs requests Bearer later refuses with `400`; the count can only overcount, never undercount.
-
-A zero count is not enough by itself to tell you JWE can be removed: a low-frequency client may show up only every few weeks. First set `MENDESKY_LEGACY_JWE=warn` and watch for a period, then `reject`, and only then remove JWE support (design §9).
+- ⚠️ `MENDESKY_APP_TOKEN_*` was renamed to the two variables above; setting any old variable fails startup (the error names the variable to use instead). This applies only to the environment-reading entry points: Bearer's `init(validators:)`, `init(validators:accepting:)`, `init(validators:acceptsApplication:)` and `AccessTokenTrust.fromEnvironment(_:)`; the explicit `init(trust:…)` never reads the environment.
+- Every init that reads the environment (`init(validators:)`, `init(validators:accepting:)`, `init(validators:acceptsApplication:)`) logs a notice at startup: `Signed access tokens enabled: ...` (audience, plus each issuer's callerTypes, actors and kids); if any 1.x `MENDESKY_AUTH_*` / `MENDESKY_LEGACY_JWE` variable is still set, it also logs one warning naming them.
 
 #### Opening routes: `accepting: [RouteAcceptance]`
 
@@ -180,7 +160,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 ```
 
 - `methods:` limits the methods a `RouteAcceptance` opens (`nil` = any method): without it a `quote:read` holder could also `POST` the route. A `HEAD` request matches an entry whose `methods` include `GET`.
-- First-party users (JWE or at+jwt) need no opt-in; every route accepts them.
+- First-party users need no opt-in; every route accepts them.
 - `.application` and `.delegatedUser` must both send `operatorId` and `applicationId`; see "Caller headers" above.
 - When a route matches several `RouteAcceptance` entries they combine as a **union (OR)**: any one admitting is enough. Adding a broader entry later (e.g. without an actor restriction) silently widens an existing actor-restricted one.
 - The old `BearerTokenAuthenticationMiddleware(acceptsApplication:)` still works and equals `accepting: [.application(where:)]`.
@@ -204,7 +184,6 @@ Behavior and status codes (at+jwt rows; the rest as in the table above):
 | Any identity: `operatorId` / `userId` / `applicationId` equal to the expected value only under Unicode canonical equivalence (NFC vs NFD) | `400` (byte-exact comparison) |
 | at+jwt: `exp` missing or not a JSON number (a boolean is not one), or already past | `401` |
 | at+jwt: `nbf` not a JSON number, or later than now | `401` |
-| 5-segment token with `MENDESKY_LEGACY_JWE=reject` | `401` |
 
 Verification accepts RS256 only (fixed, never taken from the token), requires the header to be exactly `{alg, typ, kid}` (extra parameters such as `crit` or `jwk` are refused), checks `typ`, `kid`, signature, `iss`, `aud`, `exp` and `nbf` (when present), and requires `sub`, `sub_type`, `client_id` and `scope` to be present; failure reasons are logged, **never the token**.
 
@@ -222,18 +201,37 @@ if case .application(let claims) = Caller.current {
 #### Key rotation and limits
 
 - An issuer may carry several public keys. To rotate: (1) add the new public key to the trust configuration and deploy the services; (2) switch the issuer to the new private key; (3) remove the old public key.
-- `aud` is shared platform-wide as `mendesky-services`, so any service that receives a token can use it to call other services. This is the same as JWE today and is why token forwarding works. A `.delegatedUser` token forwarded to a downstream route that isn't opened for delegatedUser gets `401`.
-- `reject` mode still requires the JWE keys (`MENDESKY_AUTH_*`) to be configured until the major version that removes JWE.
+- `aud` is shared platform-wide as `mendesky-services`, so any service that receives a token can use it to call other services. This is the same as with the 1.x JWE tokens and is why token forwarding works. A `.delegatedUser` token forwarded to a downstream route that isn't opened for delegatedUser gets `401`.
 - The base64 in `MENDESKY_ACCESS_TOKEN_TRUST` must be **single-line** (`base64 -w0` on GNU, `base64 -i file` on macOS); line-wrapped values fail startup.
 - ⚠️ `jti` gives **no replay protection**; after a client is disabled, tokens already issued stay valid until `exp` (up to 15 minutes).
-- `PermissionMiddleware` **must run after the Bearer middleware** to see at+jwt callers (it reads `Caller.current`). `.user` and `.delegatedUser` are looked up in IAM by `sub`; `.application` has no IAM user and is **never granted**, so a route open to applications must not also be a `PermissionRule` route.
+- `PermissionMiddleware` **must run after the Bearer middleware** (it reads only `Caller.current`; no caller means `401`). `.user` and `.delegatedUser` are looked up in IAM by `sub`; `.application` has no IAM user and is **never granted**, so a route open to applications must not also be a `PermissionRule` route.
 - Behavior changes for existing services upgrading: token verification failures answer `401` (some used to be `503`); errors thrown by handlers: those conforming to Hummingbird's `HTTPResponseError` keep their status (404 stays 404), any other error is still a `503` (generic `service unavailable.` body, the log carries only the error type); tokens are never logged. Application tokens now require `sub_type: "application"`, and the key rules are stricter (≥ 2048 bits, no private fields).
+
+---
+
+## Migrating from 1.3 to 2.0
+
+2.0 removes legacy JWE access tokens and accepts only RS256-signed at+jwt. The `try BearerTokenAuthenticationMiddleware(...)` calls in each service's `main.swift` (the `validators:`, `accepting:` and `acceptsApplication:` forms) and `try PermissionMiddleware(rules:provider:)` compile unchanged; what changes is the deployment configuration and a few APIs:
+
+1. **The trust configuration is required**: set `MENDESKY_ACCESS_TOKEN_TRUST` or `MENDESKY_ACCESS_TOKEN_TRUST_PATH`, otherwise startup throws `BearerTokenAuthenticationMiddlewareError.accessTokenTrustNotConfigured` (the message names only the variables). In 1.3 leaving both unset only meant "at+jwt not accepted".
+2. **`MENDESKY_AUTH_*` and `MENDESKY_LEGACY_JWE` are no longer read** (`MENDESKY_AUTH_RECIPIENT_JWK`, `MENDESKY_AUTH_RECIPIENT_JWK_PATH`, `MENDESKY_AUTH_SENDER_JWK`, `MENDESKY_AUTH_SENDER_JWK_PATH`, `MENDESKY_AUTH_PASSWORD`, `MENDESKY_LEGACY_JWE`): leaving them set does not fail startup; one warning naming them (never their values) is logged. Remove them from the deployment and delete the JWE private key. (`MENDESKY_APP_TOKEN_*` still fails startup, as in 1.3.)
+3. **`init(verification:…)` → `init(trust:…)`**: every init taking `verification:` is gone — Bearer's `init(verification:validators:)`, `init(verification:trust:legacyJWE:…)`, `init(verification:applicationTokens:validators:acceptsApplication:logger:)`, and `PermissionMiddleware.init(rules:provider:verification:…)`. Without the environment, use:
+   ```swift
+   BearerTokenAuthenticationMiddleware(trust: trust, validators: [...], accepting: [...])   // trust is not optional
+   try PermissionMiddleware(rules: rules, provider: provider)
+   ```
+   The former `init(verification:applicationTokens:…acceptsApplication:)` becomes `init(trust:accepting: [.application(where:)])`, with the first-party user issuer in the same trust. `AccessTokenVerification` keeps only the static `bearerToken(fromHeaderValue:)` and `operatorId(fromHeaders:)`; `AccessTokenPayload`, `LegacyJWEMode`, `LegacyJWEModeError` and `BearerTokenAuthenticationMiddlewareError.recipientKeyNotFoundInEnvironment` are removed.
+4. **5-segment tokens → `401`**: body `access token rejected.`, never decrypted; logged at notice as `Bearer token rejected: legacy JWE access tokens are no longer accepted` (metadata only `route` and `service`, never the token). `legacy-jwe-accepted` / `legacy-jwe-rejected` are gone.
+5. **`PermissionMiddleware` needs Bearer in front**: it no longer decrypts JWE itself; with no `Caller.current`, every request matching a rule gets `401`.
+6. **Tests**: replace JWE user tokens with at+jwt from `MiddlewareTesting`'s `AccessTokenTestSigner` (`subType: "user"`), with that signer in the trust as `callerTypes: [.user]`.
+
+Rollout: deploy every service on 1.3.0 with the trust configuration (accepts both tokens) → switch IdentityContext to at+jwt → once the old JWE tokens have expired, move services to 2.0 → delete the JWE private key and `MENDESKY_AUTH_*`.
 
 ---
 
 ## Authorization: `PermissionMiddleware` (endpoint-level RBAC)
 
-Goes after `BearerTokenAuthenticationMiddleware`. For routes covered by a rule: read `Caller.current` to get `userId` (decrypting the JWE is only the deprecated fallback) → fetch that user's permissions via a `PermissionsProvider` → **AND**-match (exact string match) against the rule's required permissions → allow or deny.
+Goes after `BearerTokenAuthenticationMiddleware`. For routes covered by a rule: read `Caller.current` to get `userId` (no caller, e.g. no Bearer in front, means `401`) → fetch that user's permissions via a `PermissionsProvider` → **AND**-match (exact string match) against the rule's required permissions → allow or deny.
 
 ### Three roles (responsibility boundaries)
 
@@ -276,7 +274,7 @@ public protocol PermissionsProvider: Sendable {
 |---|---|
 | OPTIONS | pass through (skipped) |
 | No rule covers this route | pass through |
-| Rule matched but no trusted token | `401` |
+| Rule matched but no `Caller.current` (no Bearer in front), or the caller is `.application` | `401` |
 | Provider (IAM lookup) failed | `502` (fail-closed; 502 not 503, to distinguish an upstream-dependency failure) |
 | Missing a required permission | `403` |
 | All permissions present | pass through to handler |
@@ -286,8 +284,7 @@ public protocol PermissionsProvider: Sendable {
 ## Wiring example (OCServer)
 
 ```swift
-// (1) Token-decryption keys: load from the MENDESKY_AUTH_* environment variables
-let verification = try AccessTokenVerification.fromEnvironment()
+// (1) Trust configuration: BearerTokenAuthenticationMiddleware() loads MENDESKY_ACCESS_TOKEN_TRUST(_PATH) (required)
 
 // (2) Permission source: IAM adapter (the real IAMContext client) + cache.
 //     Base URL comes from an env var — do not hardcode.
@@ -318,30 +315,29 @@ let rules: [PermissionRule] = [
 let router = Router()
 router.add(middleware: DynamicCORSMiddleware(allowedOrigins: ["https://app.mendesky.com"]))
 router.add(middleware: try BearerTokenAuthenticationMiddleware())          // authentication
-router.add(middleware: PermissionMiddleware(rules: rules,                  // authorization
-                                            provider: provider,
-                                            verification: verification))
+router.add(middleware: try PermissionMiddleware(rules: rules,              // authorization
+                                                provider: provider))
 router.add(middleware: LoggingMiddleware())
 try api.registerHandlers(on: router, serverURL: URL(string: "/opportunity-context")!)
 ```
 
-> `PermissionMiddleware` must run after `BearerTokenAuthenticationMiddleware` to see at+jwt callers (it reads `Caller.current`; when Bearer comes after it, or is absent, it only falls back to the old JWE parsing, which is deprecated).
+> `PermissionMiddleware` must run after `BearerTokenAuthenticationMiddleware`: it reads only `Caller.current`, so when Bearer comes after it, or is absent, every request matching a rule gets `401`.
 >
-> `PermissionMiddleware` also has `init(rules:provider:)` (throws), which loads `verification` from `MENDESKY_AUTH_*` itself, letting you skip step (1).
+> `PermissionMiddleware.init(rules:provider:)` is marked `throws` only so existing `try` call sites keep compiling; since 2.0 it reads no environment and never throws.
 
 ### Request flow
 
 ```
-Frontend ──HTTP──▶ CORS ─▶ BearerTokenAuth (verify JWE/at+jwt, verify operatorId/applicationId, set Caller.current) ─▶ PermissionMiddleware ─▶ handler
+Frontend ──HTTP──▶ CORS ─▶ BearerTokenAuth (verify at+jwt, verify operatorId/applicationId, set Caller.current) ─▶ PermissionMiddleware ─▶ handler
                                                                                       │ 1. match rules by method/path → required permissions
-                                                                                      │ 2. read Caller.current → userId (decrypt the JWE only as the deprecated fallback)
+                                                                                      │ 2. read Caller.current → userId (none ⇒ 401)
                                                                                       │ 3. provider fetches the user's permissions (cache hit ⇒ no IAM call)
                                                                                       │ 4. AND-match → allow / 401 / 403 / 502
                                                                                       ▼
                                                               provider miss ──HTTP──▶ IAMContext GET /employee-access/permissions/{userId}
 ```
 
-A protected request must carry: `Authorization: Bearer <token>` (at+jwt or legacy JWE) and `operatorId: <id>` (`userId` is the deprecated fallback); `.application` and `.delegatedUser` must also send `applicationId`, which `.user` may omit (the middleware fills in `mendesky-first-party`). See "Caller headers" for the values each identity sends.
+A protected request must carry: `Authorization: Bearer <token>` (at+jwt) and `operatorId: <id>` (`userId` is the deprecated fallback); `.application` and `.delegatedUser` must also send `applicationId`, which `.user` may omit (the middleware fills in `mendesky-first-party`). See "Caller headers" for the values each identity sends.
 
 ---
 
@@ -428,5 +424,5 @@ let delegated = signer.token(sub: "user-1", scope: "quote:read",
 - **`PermissionMiddleware` does not call IAMContext**: it only calls the injected `PermissionsProvider` (a port). The real HTTP client is supplied by the consumer — keeping this package free of any IAM dependency and independently compilable/testable (unit tests inject a fake provider, zero network).
 - **Where the IAM client belongs**: prefer an IAMContext client product / shared client package (implementing `PermissionsProvider`) rather than baking it into this package — "whoever provides the API owns the client."
 - **Permission freshness**: IAMContext projections are eventually consistent (a grant/revoke takes ~1–2s to reflect); the cache `ttl` / `negativeTTL` and `invalidate(userId:)` are the knobs for controlling freshness.
-- **Sender authentication**: the JWE `senderKey` is optional, but without it a token has confidentiality only and the issuer cannot be verified — set `MENDESKY_AUTH_SENDER_JWK` in production, otherwise anyone holding the recipient public key can forge a token (this middleware treats the token's `userId` as the sole authorization input).
+- **Why JWE was removed**: the 1.x JWE (ECDH-ES) had confidentiality but no issuer authentication — anyone holding the recipient **public** key could produce a valid token, and the recipient private key had to be copied to every service. 2.0 accepts only RS256-signed at+jwt; services need only the issuers' public keys.
 - **Coarse-grained**: this layer is an endpoint-level check ("may you call this endpoint"); resource-level rules ("may you edit *this* record") still belong inside the handler.

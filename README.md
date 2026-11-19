@@ -6,7 +6,7 @@ Mendesky 平台共用的 [Hummingbird 2.x](https://github.com/hummingbird-projec
 
 提供：
 
-- **認證**：Bearer token 驗證，支援 JWE（legacy）與 at+jwt（`BearerTokenAuthenticationMiddleware`）
+- **認證**：Bearer token 驗證，只接受 at+jwt（`BearerTokenAuthenticationMiddleware`；2.0 起移除 legacy JWE，見「從 1.3 升級到 2.0」）
 - **Signed access token（at+jwt）**：RS256 JWT，涵蓋第一方使用者、外部系統（application）與代理使用者（delegatedUser）；路由自行開放（`RouteAcceptance`、`Caller`、`Scope`）；測試用簽章工具在 `MiddlewareTesting`
 - **授權**：endpoint-level RBAC（`PermissionMiddleware`，即時查 IAMContext）
 - **CORS**：origin 白名單 + preflight（`DynamicCORSMiddleware`）
@@ -23,7 +23,7 @@ Mendesky 平台共用的 [Hummingbird 2.x](https://github.com/hummingbird-projec
 `Package.swift`：
 
 ```swift
-.package(url: "git@github.com:Mendesky/Middleware.git", from: "1.0.0"),
+.package(url: "git@github.com:Mendesky/Middleware.git", from: "2.0.0"),
 // target 依賴
 .product(name: "Middleware", package: "Middleware"),
 ```
@@ -39,7 +39,7 @@ swift test
 
 | 名稱 | 類型 | 角色 |
 |---|---|---|
-| `BearerTokenAuthenticationMiddleware` | server（`MiddlewareProtocol`）| 驗證 Bearer token（JWE legacy 或 at+jwt）、驗身分（你是誰）|
+| `BearerTokenAuthenticationMiddleware` | server（`MiddlewareProtocol`）| 驗證 Bearer token（at+jwt）、驗身分（你是誰）|
 | `PermissionMiddleware` | server（`MiddlewareProtocol`）| endpoint 權限檢查（你能不能做）|
 | `DynamicCORSMiddleware<Context>` | server（`RouterMiddleware`）| origin 白名單 CORS + preflight |
 | `LoggingMiddleware` | server（`MiddlewareProtocol`）| debug-level 請求/回應 log |
@@ -51,17 +51,11 @@ swift test
 
 ## 認證：`BearerTokenAuthenticationMiddleware`
 
-驗證 `Authorization: Bearer <token>`：token 是 JWE（legacy，5 段）或 at+jwt（3 段，見下方）；並比對 `operatorId`（`userId` 為 deprecated fallback）與 `applicationId` header，確保 header 與 token 一致、不能指定別人（見下方「呼叫者 header」）。
+驗證 `Authorization: Bearer <token>`：token 必須是 at+jwt（3 段，見下方「Signed access token」）；並比對 `operatorId`（`userId` 為 deprecated fallback）與 `applicationId` header，確保 header 與 token 一致、不能指定別人（見下方「呼叫者 header」）。
 
-金鑰從環境變數載入：
+信任設定（`MENDESKY_ACCESS_TOKEN_TRUST` 或 `MENDESKY_ACCESS_TOKEN_TRUST_PATH`，見下方「信任設定」）**必填**：讀環境變數的 init 在兩者都沒設時會 throw `BearerTokenAuthenticationMiddlewareError.accessTokenTrustNotConfigured`（服務不啟動）。不讀環境變數的寫法是 `init(trust:validators:accepting:serviceName:logger:)`。
 
-| 環境變數 | 必填 | 說明 |
-|---|---|---|
-| `MENDESKY_AUTH_RECIPIENT_JWK` 或 `..._JWK_PATH` | ✅ | 解密私鑰（JWK JSON / base64 或檔案路徑）|
-| `MENDESKY_AUTH_SENDER_JWK` 或 `..._JWK_PATH` | —（正式環境建議必填）| 寄件者驗證公鑰 |
-| `MENDESKY_AUTH_PASSWORD` | — | JWK 密碼（base64）|
-
-> ⚠️ **正式環境請務必設定 `MENDESKY_AUTH_SENDER_JWK`**：未設時 JWE 只有機密性、沒有寄件者認證——任何握有 recipient **公鑰**者都能偽造 token，而本中間件完全信任 token 內的 `userId`。
+> 2.0 起 legacy JWE（5 段）一律 `401`，`MENDESKY_AUTH_*` 與 `MENDESKY_LEGACY_JWE` 不再讀取；仍有設的話啟動時會記**一行** warning 列出變數名稱（不含值），請移除這些變數並刪掉 JWE 私鑰。
 
 ```swift
 router.add(middleware: try BearerTokenAuthenticationMiddleware(
@@ -76,12 +70,11 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | OPTIONS / 白名單路徑 | 放行（跳過）|
 | 沒帶 `Authorization` | `401` |
 | 不是 `Bearer <token>` 格式 | `400` |
-| JWE 解密失敗 / token 過期 | `401` |
-| JWE：沒帶 `operatorId`（或 deprecated 的 `userId`）header | `400` |
-| JWE：`operatorId` / `userId` header ≠ token 內 userId | `400`（確保 header 與 token 一致、不能指定別人）|
-| JWE：重複的 `operatorId` header；或重複的 `userId` header（即使有帶 `operatorId`）；或兩者都帶但 `operatorId` ≠ `userId` | `400` |
-| JWE：`applicationId` header 有帶但 ≠ `mendesky-first-party`，或重複 | `400` |
-| JWE：沒帶 `applicationId` | 放行，傳下去的請求補上 `applicationId: mendesky-first-party` |
+| token 驗證失敗 / 過期 | `401`（body `access token rejected.`）|
+| legacy JWE（5 段 token）| `401`（body `access token rejected.`；不解密）|
+| 沒帶 `operatorId`（或 deprecated 的 `userId`）header，或 ≠ token 內 userId | `400`（確保 header 與 token 一致、不能指定別人）|
+| `.user`：`applicationId` header 有帶但 ≠ `mendesky-first-party`，或重複 | `400` |
+| `.user`：沒帶 `applicationId` | 放行，傳下去的請求補上 `applicationId: mendesky-first-party` |
 | 驗證本身出錯（token 驗證流程的非預期錯誤）| `401` |
 
 > 白名單用 `PathValidator`（見下方），符合的路徑會跳過認證；`OPTIONS` 一律跳過（給 CORS preflight）。`PathValidator` 比對前會先照 Hummingbird router 的切法正規化路徑（去掉空 segment），所以 `/health/`、`//health` 與 `/health` 視為同一條路徑。
@@ -92,7 +85,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 
 | 身分 | `operatorId` | `applicationId` |
 |---|---|---|
-| `.user`（JWE 或 at+jwt）| 必帶，= token 內 userId（`sub`），原樣比對 | 選帶。沒帶時 Middleware 在傳給下一層的請求補上 `applicationId: mendesky-first-party`（`CallerHeaders.firstPartyApplicationId`）；有帶則必須剛好是它 |
+| `.user` | 必帶，= token 內 userId（`sub`），原樣比對 | 選帶。沒帶時 Middleware 在傳給下一層的請求補上 `applicationId: mendesky-first-party`（`CallerHeaders.firstPartyApplicationId`）；有帶則必須剛好是它 |
 | `.delegatedUser` | 必帶，= `sub` | 必帶，= actor（`act.sub`，例如 `mendesky-mcp-server`）|
 | `.application` | 必帶，= applicationId | 必帶，= applicationId |
 
@@ -104,9 +97,9 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 
 ### Signed access token（at+jwt）
 
-除了使用者 JWE token，`BearerTokenAuthenticationMiddleware` 也接受 **signed access token**：RS256 簽章的 JWT（`typ: at+jwt` 或 `application/at+jwt`，header 帶 `kid`）。共有三種呼叫者：
+`BearerTokenAuthenticationMiddleware` 只接受 **signed access token**：RS256 簽章的 JWT（`typ: at+jwt` 或 `application/at+jwt`，header 帶 `kid`）。共有三種呼叫者：
 
-- **user**：第一方使用者（IdentityContext 簽發，`sub_type: user`、無 `act`），對應 `.user`，所有路由都收，行為與 JWE 使用者相同。
+- **user**：第一方使用者（IdentityContext 簽發，`sub_type: user`、無 `act`），對應 `.user`，所有路由都收。
 - **application**：外部系統用 OAuth `client_credentials` 取得，**沒有使用者帳號**（`sub_type: application`，`sub` 為 applicationId，對外以小寫呈現），路由必須明確開放。
 - **delegatedUser**：使用者的 token 由代理者（actor，例如 MCP server）持有（`sub_type: user` 且帶 `act`，RFC 8693），路由必須明確開放。
 
@@ -116,8 +109,8 @@ claims：`iss`、`aud`（`mendesky-services`，字串或陣列皆可）、`sub`�
 
 | 環境變數 | 必填 | 說明 |
 |---|---|---|
-| `MENDESKY_ACCESS_TOKEN_TRUST_PATH` | —（兩者皆未設 = 不接受 at+jwt，只走 JWE）| 信任設定 JSON 檔案路徑；兩者都設時以檔案為準 |
-| `MENDESKY_ACCESS_TOKEN_TRUST` | — | 信任設定 JSON 的 base64 |
+| `MENDESKY_ACCESS_TOKEN_TRUST_PATH` | ✅ 二擇一（兩者皆未設 = 啟動失敗）| 信任設定 JSON 檔案路徑；兩者都設時以檔案為準 |
+| `MENDESKY_ACCESS_TOKEN_TRUST` | ✅ 二擇一 | 信任設定 JSON 的 base64 |
 
 ```json
 {
@@ -144,21 +137,8 @@ claims：`iss`、`aud`（`mendesky-services`，字串或陣列皆可）、`sub`�
   - 允許 `delegatedUser` 的發行者，`actors` 不可為空；
   - `issuer` 不可重複；同一個 `kid` 不可出現兩次（同一發行者內或跨發行者）；
   - 金鑰必須是 `kty=RSA`、有 `n` 與 `e`、`alg` 不存在或為 `RS256`、模數至少 2048 bit，且不可含私鑰欄位（`d`、`p`、`q`、`dp`、`dq`、`qi`）。
-- ⚠️ `MENDESKY_APP_TOKEN_*` 已改名為上面兩個變數；舊變數只要設了任何一個就會啟動失敗（錯誤訊息指出要改用哪個變數）。這只適用於會讀環境變數的入口：Bearer 的 `init(validators:)`、`init(validators:accepting:)`、`init(validators:acceptsApplication:)` 與 `AccessTokenTrust.fromEnvironment(_:)`；明確傳入參數的 init（`init(verification:trust:…)` 等）完全不讀環境變數。
-- `init(verification:validators:)` **永遠不讀** `MENDESKY_ACCESS_TOKEN_TRUST`：用這個 init 時，即使環境變數有設，at+jwt 也不會被接受，也不會有任何 log 提示。要啟用 at+jwt，請用 `init(validators:)`、`init(validators:accepting:)`，或明確傳入 `trust:` 的 init。
-- 會讀環境變數的 init（`init(validators:)`、`init(validators:accepting:)`、`init(validators:acceptsApplication:)`）啟動時都會寫 notice log：`Signed access tokens enabled: ...`（列出 audience 與各發行者的 callerTypes、actors、kid）或 `Signed access tokens disabled: ...`，以及 `Legacy JWE mode: accept|warn|reject`。
-
-#### 舊 JWE 開關：`MENDESKY_LEGACY_JWE`
-
-| 值 | 行為 |
-|---|---|
-| `accept`（預設，未設或空白）| 照常解密 JWE；每個通過的請求記一行 `legacy-jwe-accepted`（`.notice`）|
-| `warn` | 同上，但以 `.warning` 記錄 |
-| `reject` | 5 段 token 不解密，記 `legacy-jwe-rejected`（`.notice`）並回 `401` |
-
-其他值會啟動失敗。**只有**讀環境變數的 init 會讀這個變數：Bearer 的 `init(validators:)`、`init(validators:accepting:)`、`init(validators:acceptsApplication:)`，以及 `PermissionMiddleware.init(rules:provider:)`（沒有 Bearer 在前面時的 JWE fallback 同樣遵守此開關）。明確傳參數的 init（Bearer 的 `init(verification:validators:)`、`init(verification:applicationTokens:validators:acceptsApplication:logger:)` 永遠是 `accept`；`init(verification:trust:legacyJWE:…)` 預設 `accept`；`PermissionMiddleware.init(rules:provider:verification:…)`）使用傳入的值（或 `accept`），**忽略**此環境變數。`legacy-jwe-accepted` 的 metadata 只有 `clientId`（JWE 內的 clientId，第一方為空字串）、`route`（路由樣板如 `/items/{id}`，不是實際路徑；取不到時為 `unknown`）、`service`（預設為 process 名稱，可由 init 參數覆寫）；`legacy-jwe-rejected` 只有 `route`、`service`。log **不含 token、不含 userId**。若 `PermissionMiddleware` 放在 Bearer 前面，同一個 JWE 會被記兩次 `legacy-jwe-accepted`，Permission 也會先記下之後被 Bearer 以 `400` 擋掉的請求；計數只會多算、不會少算。
-
-計數歸零本身還不夠判斷能否移除 JWE：低頻的 client 可能每隔幾週才出現一次。建議先設 `MENDESKY_LEGACY_JWE=warn` 觀察一段時間，再改 `reject`，確認沒有人受影響後才移除 JWE 支援（見設計文件 §9）。
+- ⚠️ `MENDESKY_APP_TOKEN_*` 已改名為上面兩個變數；舊變數只要設了任何一個就會啟動失敗（錯誤訊息指出要改用哪個變數）。這只適用於會讀環境變數的入口：Bearer 的 `init(validators:)`、`init(validators:accepting:)`、`init(validators:acceptsApplication:)` 與 `AccessTokenTrust.fromEnvironment(_:)`；明確傳入參數的 `init(trust:…)` 完全不讀環境變數。
+- 會讀環境變數的 init（`init(validators:)`、`init(validators:accepting:)`、`init(validators:acceptsApplication:)`）啟動時會寫 notice log：`Signed access tokens enabled: ...`（列出 audience 與各發行者的 callerTypes、actors、kid）；若還設著 1.x 的 `MENDESKY_AUTH_*` / `MENDESKY_LEGACY_JWE`，另寫一行 warning 列出這些變數名稱。
 
 #### 開放路由：`accepting: [RouteAcceptance]`
 
@@ -180,7 +160,7 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 ```
 
 - `methods:` 限定 `RouteAcceptance` 開放的 method（`nil` = 不限）：不寫的話，持有 `quote:read` 的呼叫者也能 `POST` 該路由。`HEAD` 請求會符合 `methods` 含 `GET` 的項目。
-- 第一方 user（JWE 或 at+jwt）不需要開放，所有路由都收。
+- 第一方 user 不需要開放，所有路由都收。
 - `.application` 與 `.delegatedUser` 都必須帶 `operatorId` 與 `applicationId`，規則見上方「呼叫者 header」。
 - 同一條路由符合多個 `RouteAcceptance` 時是**聯集（OR）**：只要任一條放行就放行。之後再加一條較寬的規則（例如不限 actor），會靜默放寬原本有 actor 限定的那條。
 - 舊的 `BearerTokenAuthenticationMiddleware(acceptsApplication:)` 仍可用，等同 `accepting: [.application(where:)]`。
@@ -191,8 +171,8 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 
 | 情況 | 回應 |
 |---|---|
-| 3 段 token 但沒設信任設定 / 驗章失敗 / 過期 / 不符 `callerTypes` | `401` |
-| token 段數既不是 3 也不是 5 | `401` |
+| 驗章失敗 / 過期 / 不符 `callerTypes` | `401` |
+| token 段數不是 3（5 段的 legacy JWE 也是）| `401` |
 | 路由沒開放該身分（或 actor 不符路由限定）| `401` |
 | `.delegatedUser`：路由開放且 actor 符合，但 scope 不含 `requiresScope` | `403`（body `insufficient scope.`）|
 | `.user` 與 `.delegatedUser`：沒帶 `operatorId` 或 ≠ `sub` | `400`（deprecated 的 `userId` header 可代替，但兩者都帶時必須相同）|
@@ -204,7 +184,6 @@ router.add(middleware: try BearerTokenAuthenticationMiddleware(
 | 任何身分：`operatorId` / `userId` / `applicationId` 只在 Unicode 正規等價（NFC 對 NFD）下才等於預期值 | `400`（逐位元組比對）|
 | at+jwt：`exp` 缺少或不是 JSON 數字（布林不算），或已過期 | `401` |
 | at+jwt：`nbf` 不是 JSON 數字，或晚於現在 | `401` |
-| 5 段 token 且 `MENDESKY_LEGACY_JWE=reject` | `401` |
 
 驗證只收 RS256（固定演算法、不從 token 取），header 必須剛好是 `{alg, typ, kid}`（多帶 `crit`、`jwk` 等參數一律拒收），並檢查 `typ`、`kid`、簽章、`iss`、`aud`、`exp`、`nbf`（有帶才檢查），且 `sub`、`sub_type`、`client_id`、`scope` 必須存在；失敗的原因記在 log，**絕不記 token**。
 
@@ -222,18 +201,37 @@ if case .application(let claims) = Caller.current {
 #### 金鑰輪替與限制
 
 - 同一發行者可以放多把公鑰，輪替步驟：(1) 把新公鑰加進信任設定並部署各服務；(2) 發行者切換到新私鑰；(3) 移除舊公鑰。
-- `aud` 在整個平台共用 `mendesky-services`，所以任何收到 token 的服務都能拿它去呼叫其他服務；這與現行 JWE 相同，也是 token 轉發（forwarding）能運作的原因。`.delegatedUser` token 被轉發到沒有對 delegatedUser 開放的下游路由時，會得到 `401`。
-- `reject` 模式仍需要設定 JWE 金鑰（`MENDESKY_AUTH_*`），直到下個主版本移除 JWE 為止。
+- `aud` 在整個平台共用 `mendesky-services`，所以任何收到 token 的服務都能拿它去呼叫其他服務；這與 1.x 的 JWE 相同，也是 token 轉發（forwarding）能運作的原因。`.delegatedUser` token 被轉發到沒有對 delegatedUser 開放的下游路由時，會得到 `401`。
 - `MENDESKY_ACCESS_TOKEN_TRUST` 的 base64 必須是**單行**（GNU 用 `base64 -w0`，macOS 用 `base64 -i file`）；有換行的值會讓服務啟動失敗。
 - ⚠️ `jti` **不提供重放保護**；停用某個 client 後，已簽發的 token 仍有效直到 `exp`（最長 15 分鐘）。
-- `PermissionMiddleware` **必須排在 Bearer middleware 之後**，才收得到 at+jwt 呼叫者（它讀 `Caller.current`）。`.user` 與 `.delegatedUser` 都會以 `sub` 查 IAM；`.application` 沒有 IAM user，**永遠不放行**，所以開放 application 的路由不可同時是 `PermissionRule` 路由。
+- `PermissionMiddleware` **必須排在 Bearer middleware 之後**（它只讀 `Caller.current`；沒有呼叫者就 `401`）。`.user` 與 `.delegatedUser` 都會以 `sub` 查 IAM；`.application` 沒有 IAM user，**永遠不放行**，所以開放 application 的路由不可同時是 `PermissionRule` 路由。
 - 升級既有服務時的行為變更：token 驗證失敗一律 `401`（部分原本是 `503`）；handler 丟出的錯誤：符合 Hummingbird `HTTPResponseError` 的保留原本狀態碼（404 仍是 404），其他錯誤仍是 `503`（body 為固定的 `service unavailable.`，log 只記錯誤型別）；token 永不寫進 log。application token 現在必須帶 `sub_type: "application"`，金鑰規則也跟著變嚴（≥ 2048 bit、不可含私鑰欄位）。
+
+---
+
+## 從 1.3 升級到 2.0
+
+2.0 移除 legacy JWE access token，只接受 RS256 簽章的 at+jwt。各服務 `main.swift` 的 `try BearerTokenAuthenticationMiddleware(...)`（`validators:`、`accepting:`、`acceptsApplication:` 三種寫法）與 `try PermissionMiddleware(rules:provider:)` 原樣可編譯；要改的是部署設定與少數 API：
+
+1. **信任設定變成必填**：`MENDESKY_ACCESS_TOKEN_TRUST` 或 `MENDESKY_ACCESS_TOKEN_TRUST_PATH` 至少設一個，否則啟動時 throw `BearerTokenAuthenticationMiddlewareError.accessTokenTrustNotConfigured`（錯誤訊息只列變數名稱）。1.3 時兩者都沒設只是「不接受 at+jwt」。
+2. **`MENDESKY_AUTH_*` 與 `MENDESKY_LEGACY_JWE` 不再讀取**（`MENDESKY_AUTH_RECIPIENT_JWK`、`MENDESKY_AUTH_RECIPIENT_JWK_PATH`、`MENDESKY_AUTH_SENDER_JWK`、`MENDESKY_AUTH_SENDER_JWK_PATH`、`MENDESKY_AUTH_PASSWORD`、`MENDESKY_LEGACY_JWE`）：還設著也不會啟動失敗，只會在啟動時記一行 warning 列出變數名稱（不含值）。請從部署設定移除，並刪除 JWE 私鑰。（`MENDESKY_APP_TOKEN_*` 仍和 1.3 一樣會讓啟動失敗。）
+3. **`init(verification:…)` → `init(trust:…)`**：所有帶 `verification:` 的 init 都移除了，包括 Bearer 的 `init(verification:validators:)`、`init(verification:trust:legacyJWE:…)`、`init(verification:applicationTokens:validators:acceptsApplication:logger:)`，以及 `PermissionMiddleware.init(rules:provider:verification:…)`。不讀環境變數時改用：
+   ```swift
+   BearerTokenAuthenticationMiddleware(trust: trust, validators: [...], accepting: [...])   // trust 不可為 nil
+   try PermissionMiddleware(rules: rules, provider: provider)
+   ```
+   原本的 `init(verification:applicationTokens:…acceptsApplication:)` 改成 `init(trust:accepting: [.application(where:)])`，trust 裡同時列出第一方 user 的發行者。`AccessTokenVerification` 只剩 `bearerToken(fromHeaderValue:)`、`operatorId(fromHeaders:)` 兩個 static 方法；`AccessTokenPayload`、`LegacyJWEMode`、`LegacyJWEModeError`、`BearerTokenAuthenticationMiddlewareError.recipientKeyNotFoundInEnvironment` 都已移除。
+4. **5 段 token → `401`**：body `access token rejected.`，不解密；log 為 notice `Bearer token rejected: legacy JWE access tokens are no longer accepted`（metadata 只有 `route`、`service`，不含 token）。`legacy-jwe-accepted` / `legacy-jwe-rejected` 不再出現。
+5. **`PermissionMiddleware` 前面必須有 Bearer**：它不再自己解 JWE；沒有 `Caller.current` 時，命中規則的請求一律 `401`。
+6. **測試**：測試裡用 JWE 做的使用者 token，改用 `MiddlewareTesting` 的 `AccessTokenTestSigner` 簽 `subType: "user"` 的 at+jwt，並把該 signer 以 `callerTypes: [.user]` 放進 trust。
+
+上線順序：各服務先以 1.3.0 + 信任設定部署（同時接受兩種 token）→ IdentityContext 改發 at+jwt → 等舊 JWE token 過期（≥ 其壽命）後各服務升 2.0 → 刪除 JWE 私鑰與 `MENDESKY_AUTH_*`。
 
 ---
 
 ## 授權：`PermissionMiddleware`（endpoint-level RBAC）
 
-掛在 `BearerTokenAuthenticationMiddleware` 後面。對「有規則涵蓋」的路由：先讀 `Caller.current` 拿 `userId`（JWE 解密只是 deprecated 的後備）→ 透過 `PermissionsProvider` 取得該 user 的權限 → 跟規則要求的權限做 **AND** 比對（exact string match）→ 放行或擋。
+掛在 `BearerTokenAuthenticationMiddleware` 後面。對「有規則涵蓋」的路由：先讀 `Caller.current` 拿 `userId`（沒有呼叫者，例如前面沒掛 Bearer，就 `401`）→ 透過 `PermissionsProvider` 取得該 user 的權限 → 跟規則要求的權限做 **AND** 比對（exact string match）→ 放行或擋。
 
 ### 三個角色（責任邊界）
 
@@ -276,7 +274,7 @@ public protocol PermissionsProvider: Sendable {
 |---|---|
 | OPTIONS | 放行（跳過）|
 | 沒有規則涵蓋此路由 | 放行 |
-| 命中規則但拿不到可信 token | `401` |
+| 命中規則但沒有 `Caller.current`（前面沒有 Bearer）或呼叫者是 `.application` | `401` |
 | provider（IAM 查詢）失敗 | `502`（fail-closed；用 502 而非 503，以區分「上游依賴故障」）|
 | 缺所需權限 | `403` |
 | 權限齊全 | 放行進 handler |
@@ -286,8 +284,7 @@ public protocol PermissionsProvider: Sendable {
 ## 接線範例（以 OCServer 為例）
 
 ```swift
-// (1) Token 解密金鑰：從 MENDESKY_AUTH_* 環境變數載入
-let verification = try AccessTokenVerification.fromEnvironment()
+// (1) 信任設定：BearerTokenAuthenticationMiddleware() 從 MENDESKY_ACCESS_TOKEN_TRUST(_PATH) 載入（必填）
 
 // (2) 權限來源：IAM adapter（真正打 IAMContext 的 client）+ 快取
 //     base URL 走環境變數，別 hardcode
@@ -318,30 +315,29 @@ let rules: [PermissionRule] = [
 let router = Router()
 router.add(middleware: DynamicCORSMiddleware(allowedOrigins: ["https://app.mendesky.com"]))
 router.add(middleware: try BearerTokenAuthenticationMiddleware())          // 認證
-router.add(middleware: PermissionMiddleware(rules: rules,                  // 授權
-                                            provider: provider,
-                                            verification: verification))
+router.add(middleware: try PermissionMiddleware(rules: rules,              // 授權
+                                                provider: provider))
 router.add(middleware: LoggingMiddleware())
 try api.registerHandlers(on: router, serverURL: URL(string: "/opportunity-context")!)
 ```
 
-> `PermissionMiddleware` 必須排在 `BearerTokenAuthenticationMiddleware` 之後，才看得到 at+jwt 的呼叫者（它讀 `Caller.current`；Bearer 在後或沒有 Bearer 時只會退回舊的 JWE 解析，且已標 deprecated）。
+> `PermissionMiddleware` 必須排在 `BearerTokenAuthenticationMiddleware` 之後：它只讀 `Caller.current`，Bearer 在後或沒有 Bearer 時，命中規則的請求一律 `401`。
 >
-> `PermissionMiddleware` 另有 `init(rules:provider:)`（throws），會自己從 `MENDESKY_AUTH_*` 載入 verification，省去第 (1) 步。
+> `PermissionMiddleware.init(rules:provider:)` 標成 `throws` 只是為了相容既有的 `try` 呼叫；2.0 起它不讀環境變數、也不會 throw。
 
 ### 一次請求的流向
 
 ```
-前端 ──HTTP──▶ CORS ─▶ BearerTokenAuth（驗證 JWE/at+jwt、驗 operatorId/applicationId、設定 Caller.current）─▶ PermissionMiddleware ─▶ handler
+前端 ──HTTP──▶ CORS ─▶ BearerTokenAuth（驗證 at+jwt、驗 operatorId/applicationId、設定 Caller.current）─▶ PermissionMiddleware ─▶ handler
                                                                             │ 1. method/path 比對 rules → 算出本請求所需權限
-                                                                            │ 2. 讀 Caller.current 拿 userId（沒有時才退回解密 JWE，已 deprecated）
+                                                                            │ 2. 讀 Caller.current 拿 userId（沒有就 401）                       
                                                                             │ 3. provider 取該 user 權限（命中快取就不打 IAM）
                                                                             │ 4. AND 比對 → 放行 / 401 / 403 / 502
                                                                             ▼
                                                         provider 未命中 ──HTTP──▶ IAMContext GET /employee-access/permissions/{userId}
 ```
 
-受保護請求必帶：`Authorization: Bearer <token>`（at+jwt 或 legacy JWE）與 `operatorId: <id>`（`userId` 為 deprecated fallback）；`.application` 與 `.delegatedUser` 另須帶 `applicationId`，`.user` 可省略（Middleware 補上 `mendesky-first-party`）。各身分應帶的值見「呼叫者 header」。
+受保護請求必帶：`Authorization: Bearer <token>`（at+jwt）與 `operatorId: <id>`（`userId` 為 deprecated fallback）；`.application` 與 `.delegatedUser` 另須帶 `applicationId`，`.user` 可省略（Middleware 補上 `mendesky-first-party`）。各身分應帶的值見「呼叫者 header」。
 
 ---
 
@@ -428,5 +424,5 @@ let delegated = signer.token(sub: "user-1", scope: "quote:read",
 - **`PermissionMiddleware` 不打 IAMContext**：它只呼叫注入的 `PermissionsProvider`（port）。真正的 HTTP client 由消費端提供——讓本套件保持零 IAM 依賴、可單獨編譯與測試（單元測試注入 fake provider，0 網路）。
 - **IAM client 該放哪**：建議放在 IAMContext 的 client 產物 / 共用 client 套件（implement `PermissionsProvider`），而非塞進本套件——「誰提供 API，誰擁有 client」。
 - **權限新鮮度**：IAMContext 投影為最終一致（grant/revoke 後 ~1–2s 才反映）；快取 `ttl` / `negativeTTL` 與 `invalidate(userId:)` 是控制新鮮度的旋鈕。
-- **寄件者認證**：JWE 的 `senderKey` 為選用，但未設時 token 只有機密性、無法驗證簽發者——正式環境務必設定 `MENDESKY_AUTH_SENDER_JWK`，否則握有 recipient 公鑰者可偽造 token（本中間件以 token 內 `userId` 為唯一授權輸入）。
+- **為什麼移除 JWE**：1.x 的 JWE（ECDH-ES）只有機密性、沒有簽發者認證——任何握有 recipient **公鑰**者都能做出一個合法的 token，而 recipient 私鑰又得複製到每個服務。2.0 只收 RS256 簽章的 at+jwt，各服務只需要發行者的公鑰。
 - **粗粒度**：本層是 endpoint 級檢查（「能不能呼叫這個 endpoint」）；resource 級規則（「能不能改這一筆」）仍須在 handler 內做。
