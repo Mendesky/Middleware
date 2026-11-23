@@ -84,7 +84,22 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
         try self.init(
             environment: ProcessInfo.processInfo.environment,
             validators: validators,
-            accepting: [.application(where: acceptsApplication)]
+            acceptsApplication: acceptsApplication
+        )
+    }
+
+    /// `init(validators:acceptsApplication:)` with an explicit environment (tests).
+    init(
+        environment: [String: String],
+        validators: [any WhitelistValidator],
+        acceptsApplication: @escaping @Sendable (Request) -> Bool,
+        logger: Logger = Logger(label: "IdentityContext.BearerTokenAuthenticationMiddleware")
+    ) throws {
+        try self.init(
+            environment: environment,
+            validators: validators,
+            accepting: [.application(where: acceptsApplication)],
+            logger: logger
         )
     }
 

@@ -227,6 +227,8 @@ if case .application(let claims) = Caller.current {
 
 Rollout: deploy every service on 1.3.0 with the trust configuration (accepts both tokens) → switch IdentityContext to at+jwt → once the old JWE tokens have expired, move services to 2.0 → delete the JWE private key and `MENDESKY_AUTH_*`.
 
+Before moving to 2.0, check on the services still running 1.3 that `legacy-jwe-accepted` has stopped appearing (the last one older than the JWE lifetime, 15 minutes for first-party JWE). 2.0 no longer logs it (see point 4), so this can only be checked on 1.3; a fresh `legacy-jwe-accepted` means someone still sends JWE and would get `401` on 2.0.
+
 ---
 
 ## Authorization: `PermissionMiddleware` (endpoint-level RBAC)

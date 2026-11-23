@@ -7,7 +7,7 @@
 import Foundation
 import HTTPTypes
 
-/// Bearer-header parsing helpers shared by the auth and permission middleware.
+/// Bearer-header parsing helpers used by the Bearer middleware (and public for services that read these headers).
 ///
 /// Until 2.0 this type also decrypted legacy JWE user tokens; that support is gone (signed `at+jwt` tokens are
 /// verified by `SignedAccessTokenVerification`), and only these static helpers remain.
@@ -15,7 +15,7 @@ public enum AccessTokenVerification {
     /// Extracts the compact token from an `Authorization: Bearer <token>` header value, or `nil`
     /// if it is not well-formed. The auth-scheme is matched case-insensitively (RFC 7235), the value
     /// must be exactly `<scheme> <token>` (one token, no extra segments), and an empty/missing token
-    /// yields `nil`. Shared by the auth and permission middleware so parsing lives in one place.
+    /// yields `nil`.
     public static func bearerToken(fromHeaderValue value: String) -> String? {
         let parts = value.split(separator: " ", omittingEmptySubsequences: true)
         guard parts.count == 2, parts[0].lowercased() == "bearer" else { return nil }

@@ -13,7 +13,7 @@ private struct BoomError: Error, CustomStringConvertible {
 }
 
 /// `ic` issues first-party users; `signer` issues application tokens unless `configured` is false (then it is not
-/// trusted at all). Routes under `/open` accept application tokens (the older `acceptsApplication:` spelling).
+/// trusted at all). Routes under `/open` accept application tokens (`accepting: [.application(where:)]`).
 private func makeApp(
     signer: ApplicationTokenTestSigner,
     configured: Bool = true,
@@ -38,6 +38,39 @@ private func makeApp(
 
 @Suite struct BearerApplicationTokenTests {
     let signer = ApplicationTokenTestSigner()
+
+    // The environment spelling services use: `try BearerTokenAuthenticationMiddleware(acceptsApplication:)`.
+    // It must open exactly the routes the closure picks to application tokens, and keep users passing everywhere.
+    @Test func acceptsApplicationSpellingOpensOnlyThePickedRoutes() async throws {
+        let environment = [
+            "MENDESKY_ACCESS_TOKEN_TRUST": ApplicationTokenTestSigner.trustBase64(issuers: [
+                ic.trustedIssuer(callerTypes: [.user]),
+                signer.trustedIssuer(callerTypes: [.application]),
+            ])
+        ]
+        let router = Router()
+        router.add(middleware: try BearerTokenAuthenticationMiddleware(
+            environment: environment,
+            validators: [],
+            acceptsApplication: { $0.uri.path.hasPrefix("/open") },
+            logger: Logger(label: "test") { _ in SwiftLogNoOpLogHandler() }
+        ))
+        router.get("open") { _, _ in describe(Caller.current) }
+        router.get("closed") { _, _ in describe(Caller.current) }
+        let appToken = signer.token(sub: "app-1")
+        let user = ic.token(sub: "u1", clientId: "mendesky-first-party", subType: "user")
+        try await Application(router: router).test(.router) { client in
+            let open = try await client.execute(
+                uri: "/open", method: .get, headers: headers(appToken, operatorId: "app-1", applicationId: "app-1"))
+            #expect(open.status == .ok)
+            #expect(String(buffer: open.body) == "application:app-1")
+            let closed = try await client.execute(
+                uri: "/closed", method: .get, headers: headers(appToken, operatorId: "app-1", applicationId: "app-1"))
+            #expect(closed.status == .unauthorized)
+            let userClosed = try await client.execute(uri: "/closed", method: .get, headers: headers(user, operatorId: "u1"))
+            #expect(userClosed.status == .ok)
+        }
+    }
 
     @Test func plainHandlerErrorsAre503WithGenericBodyAndNoDescriptionLogged() async throws {
         let (logger, store) = CapturingLogHandler.logger()

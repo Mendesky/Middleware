@@ -51,7 +51,7 @@ private let legacyEnvironment = [
     "MENDESKY_AUTH_SENDER_JWK": "secret-sender-jwk",
     "MENDESKY_AUTH_SENDER_JWK_PATH": "/secret/sender.json",
     "MENDESKY_AUTH_PASSWORD": "secret-password",
-    "MENDESKY_LEGACY_JWE": "accept",
+    "MENDESKY_LEGACY_JWE": "secret-legacy-mode",
 ]
 
 @Suite struct LegacyJWERemovalTests {
@@ -150,7 +150,7 @@ private let legacyEnvironment = [
         let warning = try #require(warnings.first)
         #expect(warning.hasPrefix("warning"))
         for name in legacyEnvironment.keys { #expect(warning.contains(name), "\(name)") }
-        for value in legacyEnvironment.values where value != "accept" { #expect(!store.all.contains(value), "\(value)") }
+        for value in legacyEnvironment.values { #expect(!store.all.contains(value), "\(value)") }
         #expect(lines(store, containing: "Signed access tokens enabled: audience=").count == 1)
 
         // Still works: the variables change nothing.

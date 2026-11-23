@@ -227,6 +227,8 @@ if case .application(let claims) = Caller.current {
 
 上線順序：各服務先以 1.3.0 + 信任設定部署（同時接受兩種 token）→ IdentityContext 改發 at+jwt → 等舊 JWE token 過期（≥ 其壽命）後各服務升 2.0 → 刪除 JWE 私鑰與 `MENDESKY_AUTH_*`。
 
+升 2.0 之前，先在還跑 1.3 的服務上確認 `legacy-jwe-accepted` log 已經停止出現（最後一筆早於 JWE 的壽命，第一方 JWE 是 15 分鐘）。2.0 沒有這行 log（見第 4 點），只能在 1.3 上查；還有新的 `legacy-jwe-accepted` 就代表仍有人拿 JWE 進來，這時升 2.0 會讓他們 401。
+
 ---
 
 ## 授權：`PermissionMiddleware`（endpoint-level RBAC）
