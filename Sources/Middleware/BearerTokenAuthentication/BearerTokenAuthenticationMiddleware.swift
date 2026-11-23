@@ -134,7 +134,17 @@ public struct BearerTokenAuthenticationMiddleware: MiddlewareProtocol {
             return "issuer=\(issuer.issuer) callerTypes=\(callerTypes) actors=\(issuer.actors) kids=\(kids)"
         }
         logger.notice("Signed access tokens enabled: audience=\(trust.audience); \(issuers.joined(separator: "; "))")
+
+        // A trust without a `user` issuer was a valid 1.x deployment (users came in as JWE). Since 2.0 the same
+        // configuration starts fine but refuses every first-party user. Warn rather than throw: a service that only
+        // serves application or delegated user tokens is legitimate.
+        if !trust.issuers.contains(where: { $0.callerTypes.contains(.user) }) {
+            logger.warning("\(Self.noUserIssuerWarning)")
+        }
     }
+
+    static let noUserIssuerWarning =
+        "No issuer in the access token trust is trusted for user tokens: every first-party user token will be rejected (401)"
 
     private func isWhitelisted(_ request: Request) -> Bool {
         validators.contains { $0.isWhitelisted(request) }

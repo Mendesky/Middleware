@@ -171,8 +171,8 @@ Behavior and status codes (at+jwt rows; the rest as in the table above):
 
 | Situation | Response |
 |---|---|
-| 3-segment token with no trust configuration / bad signature / expired / `callerTypes` mismatch | `401` |
-| Token with neither 3 nor 5 segments | `401` |
+| Bad signature / expired / `callerTypes` mismatch | `401` |
+| Token without exactly 3 segments (a 5-segment legacy JWE included) | `401` |
 | Route not open to that caller (or actor not allowed by the route) | `401` |
 | `.delegatedUser`: route open and actor allowed, but scope lacks `requiresScope` | `403` (body `insufficient scope.`) |
 | `.user` and `.delegatedUser`: `operatorId` missing or ≠ `sub` | `400` (the deprecated `userId` header may stand in for it, but when both are sent they must be identical) |
@@ -213,7 +213,7 @@ if case .application(let claims) = Caller.current {
 
 2.0 removes legacy JWE access tokens and accepts only RS256-signed at+jwt. The `try BearerTokenAuthenticationMiddleware(...)` calls in each service's `main.swift` (the `validators:`, `accepting:` and `acceptsApplication:` forms) and `try PermissionMiddleware(rules:provider:)` compile unchanged; what changes is the deployment configuration and a few APIs:
 
-1. **The trust configuration is required**: set `MENDESKY_ACCESS_TOKEN_TRUST` or `MENDESKY_ACCESS_TOKEN_TRUST_PATH`, otherwise startup throws `BearerTokenAuthenticationMiddlewareError.accessTokenTrustNotConfigured` (the message names only the variables). In 1.3 leaving both unset only meant "at+jwt not accepted".
+1. **The trust configuration is required**: set `MENDESKY_ACCESS_TOKEN_TRUST` or `MENDESKY_ACCESS_TOKEN_TRUST_PATH`, otherwise startup throws `BearerTokenAuthenticationMiddlewareError.accessTokenTrustNotConfigured` (the message names only the variables). In 1.3 leaving both unset only meant "at+jwt not accepted". **The trust must list IdentityContext as the user issuer (`callerTypes: ["user"]`)**: a 1.3 trust that lists only application / delegated user issuers was fine while users came in as JWE, but on 2.0 it still starts and every first-party user gets `401`. The environment inits log one warning when no issuer is trusted for user tokens (`No issuer in the access token trust is trusted for user tokens: ...`).
 2. **`MENDESKY_AUTH_*` and `MENDESKY_LEGACY_JWE` are no longer read** (`MENDESKY_AUTH_RECIPIENT_JWK`, `MENDESKY_AUTH_RECIPIENT_JWK_PATH`, `MENDESKY_AUTH_SENDER_JWK`, `MENDESKY_AUTH_SENDER_JWK_PATH`, `MENDESKY_AUTH_PASSWORD`, `MENDESKY_LEGACY_JWE`): leaving them set does not fail startup; one warning naming them (never their values) is logged. Remove them from the deployment and delete the JWE private key. (`MENDESKY_APP_TOKEN_*` still fails startup, as in 1.3.)
 3. **`init(verification:…)` → `init(trust:…)`**: every init taking `verification:` is gone — Bearer's `init(verification:validators:)`, `init(verification:trust:legacyJWE:…)`, `init(verification:applicationTokens:validators:acceptsApplication:logger:)`, and `PermissionMiddleware.init(rules:provider:verification:…)`. Without the environment, use:
    ```swift

@@ -183,4 +183,44 @@ private let legacyEnvironment = [
         #expect(!store.all.contains("warning"))
         #expect(lines(store, containing: "Signed access tokens enabled: audience=").count == 1)
     }
+
+    // A 1.x trust that lists only application / delegated user issuers (users came in as JWE) still starts on 2.0,
+    // but every first-party user would get 401, so the environment init says so once.
+    @Test func trustWithoutAUserIssuerWarnsButStarts() async throws {
+        let (logger, store) = CapturingLogHandler.logger()
+        let environment = [
+            "MENDESKY_ACCESS_TOKEN_TRUST": ApplicationTokenTestSigner.trustBase64(issuers: [
+                oc.trustedIssuer(callerTypes: [.application]),
+                ic.trustedIssuer(callerTypes: [.delegatedUser], actors: ["claude"]),
+            ])
+        ]
+        let middleware = try BearerTokenAuthenticationMiddleware(
+            environment: environment, validators: [], accepting: [], logger: logger)
+
+        let warnings = lines(store, containing: BearerTokenAuthenticationMiddleware.noUserIssuerWarning)
+        #expect(warnings.count == 1)
+        #expect(try #require(warnings.first).hasPrefix("warning"))
+
+        // The warning describes what really happens: a first-party user token is refused.
+        let router = Router()
+        router.add(middleware: middleware)
+        router.get("items/:id") { _, _ in "ok" }
+        try await Application(router: router).test(.router) { client in
+            let res = try await client.execute(uri: "/items/1", method: .get, headers: headers(firstPartyToken(), operatorId: userId))
+            #expect(res.status == .unauthorized)
+        }
+    }
+
+    @Test func trustWithAUserIssuerDoesNotWarnAboutUsers() throws {
+        let (logger, store) = CapturingLogHandler.logger()
+        let environment = [
+            "MENDESKY_ACCESS_TOKEN_TRUST": ApplicationTokenTestSigner.trustBase64(issuers: [
+                ic.trustedIssuer(callerTypes: [.user]),
+                oc.trustedIssuer(callerTypes: [.application]),
+            ])
+        ]
+        _ = try BearerTokenAuthenticationMiddleware(environment: environment, validators: [], accepting: [], logger: logger)
+        #expect(lines(store, containing: BearerTokenAuthenticationMiddleware.noUserIssuerWarning).isEmpty)
+        #expect(!store.all.contains("warning"))
+    }
 }

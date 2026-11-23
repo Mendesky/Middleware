@@ -213,7 +213,7 @@ if case .application(let claims) = Caller.current {
 
 2.0 移除 legacy JWE access token，只接受 RS256 簽章的 at+jwt。各服務 `main.swift` 的 `try BearerTokenAuthenticationMiddleware(...)`（`validators:`、`accepting:`、`acceptsApplication:` 三種寫法）與 `try PermissionMiddleware(rules:provider:)` 原樣可編譯；要改的是部署設定與少數 API：
 
-1. **信任設定變成必填**：`MENDESKY_ACCESS_TOKEN_TRUST` 或 `MENDESKY_ACCESS_TOKEN_TRUST_PATH` 至少設一個，否則啟動時 throw `BearerTokenAuthenticationMiddlewareError.accessTokenTrustNotConfigured`（錯誤訊息只列變數名稱）。1.3 時兩者都沒設只是「不接受 at+jwt」。
+1. **信任設定變成必填**：`MENDESKY_ACCESS_TOKEN_TRUST` 或 `MENDESKY_ACCESS_TOKEN_TRUST_PATH` 至少設一個，否則啟動時 throw `BearerTokenAuthenticationMiddlewareError.accessTokenTrustNotConfigured`（錯誤訊息只列變數名稱）。1.3 時兩者都沒設只是「不接受 at+jwt」。**trust 必須把 IdentityContext 列為 user 發行者（`callerTypes: ["user"]`）**：1.3 時只列 application／delegatedUser 發行者的 trust 還能用（使用者走 JWE），升 2.0 後一樣能啟動，但所有第一方使用者都會 `401`。讀環境變數的 init 在沒有任何發行者接受 user token 時會記一行 warning（`No issuer in the access token trust is trusted for user tokens: ...`）。
 2. **`MENDESKY_AUTH_*` 與 `MENDESKY_LEGACY_JWE` 不再讀取**（`MENDESKY_AUTH_RECIPIENT_JWK`、`MENDESKY_AUTH_RECIPIENT_JWK_PATH`、`MENDESKY_AUTH_SENDER_JWK`、`MENDESKY_AUTH_SENDER_JWK_PATH`、`MENDESKY_AUTH_PASSWORD`、`MENDESKY_LEGACY_JWE`）：還設著也不會啟動失敗，只會在啟動時記一行 warning 列出變數名稱（不含值）。請從部署設定移除，並刪除 JWE 私鑰。（`MENDESKY_APP_TOKEN_*` 仍和 1.3 一樣會讓啟動失敗。）
 3. **`init(verification:…)` → `init(trust:…)`**：所有帶 `verification:` 的 init 都移除了，包括 Bearer 的 `init(verification:validators:)`、`init(verification:trust:legacyJWE:…)`、`init(verification:applicationTokens:validators:acceptsApplication:logger:)`，以及 `PermissionMiddleware.init(rules:provider:verification:…)`。不讀環境變數時改用：
    ```swift
