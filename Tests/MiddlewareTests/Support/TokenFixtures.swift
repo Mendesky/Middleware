@@ -10,7 +10,7 @@ import JSONWebEncryption
 import MiddlewareTesting
 @testable import Middleware
 
-// Shared by the bearer, legacy-JWE and permission-chain tests.
+// Shared by the bearer, JWE-removal and permission-chain tests.
 
 /// Signs first-party (IdentityContext) tokens.
 let ic = ApplicationTokenTestSigner(kid: "ic-1", issuer: "https://identity.test")
@@ -25,16 +25,24 @@ func icOcTrust(ocActors: [String] = ["mendesky-mcp-server"]) throws -> AccessTok
     ])
 }
 
-/// Recipient key for the legacy JWE user tokens made by `jweUserToken`.
-let testRecipientKey: JWK = P256.KeyAgreement.PrivateKey().jwkRepresentation
+/// The 1.x JWE access token payload; Middleware no longer has this type.
+private struct LegacyJWEPayload: Encodable {
+    let authorizationId: String
+    let userId: String
+    let clientId: String
+    let scope: [String]
+    let expiresAt: Date
+}
 
-/// A legacy JWE user token (5 segments) for `testRecipientKey`.
+/// A genuine legacy JWE user token (5 segments, ECDH-ES), as IdentityContext minted before 2.0, encrypted to a
+/// throwaway key. 2.0 must refuse it without trying to decrypt it.
 func jweUserToken(userId: String, clientId: String = "c", expiresIn: TimeInterval = 3600) throws -> String {
-    let payload = AccessTokenPayload(
+    let payload = LegacyJWEPayload(
         authorizationId: "a", userId: userId, clientId: clientId, scope: [], expiresAt: Date(timeIntervalSinceNow: expiresIn))
+    let recipientKey: JWK = P256.KeyAgreement.PrivateKey().jwkRepresentation
     let jwe = try JWE(
         payload: try JSONEncoder().encode(payload), keyManagementAlg: .ecdhESA256KW, encryptionAlgorithm: .a256GCM,
-        recipientKey: testRecipientKey)
+        recipientKey: recipientKey)
     return jwe.compactSerialization
 }
 

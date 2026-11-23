@@ -17,7 +17,6 @@ private func echo(_ request: Request) -> String {
 private func makeApp(receiverKeys: [HTTPField.Name]? = nil) throws -> some ApplicationProtocol {
     let router = Router()
     router.add(middleware: BearerTokenAuthenticationMiddleware(
-        verification: AccessTokenVerification(recipientKey: testRecipientKey)!,
         trust: try icOcTrust(ocActors: [mcpActor, "other-mcp"]),
         validators: [PathValidator("/public")],
         accepting: [
@@ -67,7 +66,7 @@ private func rawHeaders(_ token: String, _ pairs: [(String, String)]) -> HTTPFie
 }
 
 @Suite struct BearerApplicationIdUserTests {
-    /// The `.user` rule, for both a signed at+jwt and a legacy JWE.
+    /// The `.user` rule, for a signed at+jwt.
     private func checkUser(token: String, userId: String, described: String) async throws {
         let app = try makeApp()
         try await app.test(.router) { client in
@@ -94,10 +93,6 @@ private func rawHeaders(_ token: String, _ pairs: [(String, String)]) -> HTTPFie
 
     @Test func signedUserApplicationIdIsOptionalAndFilledIn() async throws {
         try await checkUser(token: atJwtUser(), userId: "acc_1", described: "user:acc_1:mendesky-first-party")
-    }
-
-    @Test func jweUserApplicationIdIsOptionalAndFilledIn() async throws {
-        try await checkUser(token: try jweUserToken(userId: "u1"), userId: "u1", described: "user:u1:c")
     }
 
     @Test func repeatedApplicationIdIsRefusedEvenWhenOneMatches() async throws {
@@ -246,7 +241,6 @@ private func rawHeaders(_ token: String, _ pairs: [(String, String)]) -> HTTPFie
     /// Every caller type with the headers that are right for it besides `operatorId`.
     private func callers() throws -> [(name: String, token: String, operatorId: String, applicationId: String?)] {
         [
-            ("jwe", try jweUserToken(userId: "u1"), "u1", nil),
             ("at+jwt user", atJwtUser(), "acc_1", nil),
             ("delegated", delegatedToken(), "acc_1", mcpActor),
             ("application", applicationToken(), appId, appId),

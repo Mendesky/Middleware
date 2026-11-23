@@ -106,7 +106,7 @@ public struct AccessTokenTrust: Sendable {
     }
 
     /// Reads `MENDESKY_ACCESS_TOKEN_TRUST_PATH` (a file; wins) or `MENDESKY_ACCESS_TOKEN_TRUST` (base64 JSON).
-    /// Returns `nil` when neither is set (feature off). Any pre-unification application-token variable
+    /// Returns `nil` when neither is set; the Bearer environment inits turn that into a startup error (required since 2.0). Any pre-unification application-token variable
     /// (the four names listed below) makes this throw `.renamedVariable`, so an old deployment fails loudly instead of silently losing a path.
     public static func fromEnvironment(
         _ env: [String: String] = ProcessInfo.processInfo.environment

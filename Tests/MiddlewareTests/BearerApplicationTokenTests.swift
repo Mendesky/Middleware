@@ -12,19 +12,19 @@ private struct BoomError: Error, CustomStringConvertible {
     var description: String { "boom \(secret)" }
 }
 
+/// `ic` issues first-party users; `signer` issues application tokens unless `configured` is false (then it is not
+/// trusted at all). Routes under `/open` accept application tokens (`accepting: [.application(where:)]`).
 private func makeApp(
     signer: ApplicationTokenTestSigner,
     configured: Bool = true,
     logger: Logger = Logger(label: "test") { _ in SwiftLogNoOpLogHandler() }
-) -> some ApplicationProtocol {
-    let applicationTokens = configured
-        ? try? ApplicationTokenVerification(publicKeys: [signer.publicKey], issuer: ApplicationTokenTestSigner.defaultIssuer, audience: ApplicationTokenTestSigner.defaultAudience)
-        : nil
+) throws -> some ApplicationProtocol {
+    let issuers = [ic.trustedIssuer(callerTypes: [.user])]
+        + (configured ? [signer.trustedIssuer(callerTypes: [.application])] : [])
     let router = Router()
     router.add(middleware: BearerTokenAuthenticationMiddleware(
-        verification: AccessTokenVerification(recipientKey: testRecipientKey)!,
-        applicationTokens: applicationTokens,
-        acceptsApplication: { $0.uri.path.hasPrefix("/open") },
+        trust: try AccessTokenTrust(audience: ApplicationTokenTestSigner.defaultAudience, issuers: issuers),
+        accepting: [.application(where: { $0.uri.path.hasPrefix("/open") })],
         logger: logger
     ))
     router.get("open") { _, _ in describe(Caller.current) }
@@ -39,10 +39,43 @@ private func makeApp(
 @Suite struct BearerApplicationTokenTests {
     let signer = ApplicationTokenTestSigner()
 
+    // The environment spelling services use: `try BearerTokenAuthenticationMiddleware(acceptsApplication:)`.
+    // It must open exactly the routes the closure picks to application tokens, and keep users passing everywhere.
+    @Test func acceptsApplicationSpellingOpensOnlyThePickedRoutes() async throws {
+        let environment = [
+            "MENDESKY_ACCESS_TOKEN_TRUST": ApplicationTokenTestSigner.trustBase64(issuers: [
+                ic.trustedIssuer(callerTypes: [.user]),
+                signer.trustedIssuer(callerTypes: [.application]),
+            ])
+        ]
+        let router = Router()
+        router.add(middleware: try BearerTokenAuthenticationMiddleware(
+            environment: environment,
+            validators: [],
+            acceptsApplication: { $0.uri.path.hasPrefix("/open") },
+            logger: Logger(label: "test") { _ in SwiftLogNoOpLogHandler() }
+        ))
+        router.get("open") { _, _ in describe(Caller.current) }
+        router.get("closed") { _, _ in describe(Caller.current) }
+        let appToken = signer.token(sub: "app-1")
+        let user = ic.token(sub: "u1", clientId: "mendesky-first-party", subType: "user")
+        try await Application(router: router).test(.router) { client in
+            let open = try await client.execute(
+                uri: "/open", method: .get, headers: headers(appToken, operatorId: "app-1", applicationId: "app-1"))
+            #expect(open.status == .ok)
+            #expect(String(buffer: open.body) == "application:app-1")
+            let closed = try await client.execute(
+                uri: "/closed", method: .get, headers: headers(appToken, operatorId: "app-1", applicationId: "app-1"))
+            #expect(closed.status == .unauthorized)
+            let userClosed = try await client.execute(uri: "/closed", method: .get, headers: headers(user, operatorId: "u1"))
+            #expect(userClosed.status == .ok)
+        }
+    }
+
     @Test func plainHandlerErrorsAre503WithGenericBodyAndNoDescriptionLogged() async throws {
         let (logger, store) = CapturingLogHandler.logger()
-        let app = makeApp(signer: signer, logger: logger)
-        let user = try jweUserToken(userId: "u1")
+        let app = try makeApp(signer: signer, logger: logger)
+        let user = ic.token(sub: "u1", clientId: "mendesky-first-party", subType: "user")
         let appToken = signer.token(sub: "app-1")
         try await app.test(.router) { client in
             let u = try await client.execute(uri: "/closed/boom", method: .get, headers: headers(user, operatorId: "u1"))
@@ -61,7 +94,7 @@ private func makeApp(
 
     @Test func rejectedApplicationTokenLogsTheErrorCaseButNotTheToken() async throws {
         let (logger, store) = CapturingLogHandler.logger()
-        let app = makeApp(signer: signer, logger: logger)
+        let app = try makeApp(signer: signer, logger: logger)
         let token = signer.token(sub: "app-1", issuer: "https://other")
         // The signature is checked before the route, so a valid token is needed to reach the route decision.
         let valid = signer.token(sub: "app-1")
@@ -77,18 +110,18 @@ private func makeApp(
         #expect(!store.all.contains(valid))
     }
 
-    @Test func unconfiguredApplicationTokenLogsWhy() async throws {
+    @Test func untrustedApplicationIssuerLogsWhy() async throws {
         let (logger, store) = CapturingLogHandler.logger()
-        let app = makeApp(signer: signer, configured: false, logger: logger)
+        let app = try makeApp(signer: signer, configured: false, logger: logger)
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/open", method: .get, headers: headers(signer.token(sub: "app-1")))
             #expect(res.status == .unauthorized)
         }
-        #expect(store.all.contains("not configured"))
+        #expect(store.all.contains("untrustedIssuer"))
     }
 
     @Test func applicationTokenOnOptedInRoutePasses() async throws {
-        let app = makeApp(signer: signer)
+        let app = try makeApp(signer: signer)
         let token = signer.token(sub: "ABCDEF01-0000-0000-0000-000000000001")
         let applicationId = "abcdef01-0000-0000-0000-000000000001"
         try await app.test(.router) { client in
@@ -100,7 +133,7 @@ private func makeApp(
     }
 
     @Test func applicationTokenWithoutCallerHeadersIs400() async throws {
-        let app = makeApp(signer: signer)
+        let app = try makeApp(signer: signer)
         let token = signer.token(sub: "app-1")
         try await app.test(.router) { client in
             let none = try await client.execute(uri: "/open", method: .get, headers: headers(token))
@@ -112,7 +145,7 @@ private func makeApp(
     }
 
     @Test func applicationTokenOnOtherRouteIs401() async throws {
-        let app = makeApp(signer: signer)
+        let app = try makeApp(signer: signer)
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/closed", method: .get, headers: headers(signer.token(sub: "app-1")))
             #expect(res.status == .unauthorized)
@@ -120,7 +153,7 @@ private func makeApp(
     }
 
     @Test func applicationTokenWithoutConfiguredKeyIs401() async throws {
-        let app = makeApp(signer: signer, configured: false)
+        let app = try makeApp(signer: signer, configured: false)
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/open", method: .get, headers: headers(signer.token(sub: "app-1")))
             #expect(res.status == .unauthorized)
@@ -128,7 +161,7 @@ private func makeApp(
     }
 
     @Test func badApplicationTokenIs401() async throws {
-        let app = makeApp(signer: signer)
+        let app = try makeApp(signer: signer)
         let other = ApplicationTokenTestSigner()
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/open", method: .get, headers: headers(other.token(sub: "app-1")))
@@ -137,8 +170,8 @@ private func makeApp(
     }
 
     @Test func userTokenStillRequiresOperatorId() async throws {
-        let app = makeApp(signer: signer)
-        let token = try jweUserToken(userId: "u1")
+        let app = try makeApp(signer: signer)
+        let token = ic.token(sub: "u1", clientId: "mendesky-first-party", subType: "user")
         try await app.test(.router) { client in
             let missing = try await client.execute(uri: "/open", method: .get, headers: headers(token))
             #expect(missing.status == .badRequest)
@@ -146,13 +179,13 @@ private func makeApp(
             #expect(mismatch.status == .badRequest)
             let ok = try await client.execute(uri: "/closed", method: .get, headers: headers(token, operatorId: "u1"))
             #expect(ok.status == .ok)
-            #expect(String(buffer: ok.body) == "user:u1:c")
+            #expect(String(buffer: ok.body) == "user:u1:mendesky-first-party")
         }
     }
 
-    @Test func undecryptableJWEIs401AndNotLogged() async throws {
+    @Test func fiveSegmentTokenIs401AndNotLogged() async throws {
         let (logger, store) = CapturingLogHandler.logger()
-        let app = makeApp(signer: signer, logger: logger)
+        let app = try makeApp(signer: signer, logger: logger)
         let garbage = "aaaa.bbbb.cccc.dddd.eeee"
         try await app.test(.router) { client in
             let res = try await client.execute(uri: "/closed", method: .get, headers: headers(garbage, operatorId: "u1"))
@@ -163,8 +196,8 @@ private func makeApp(
     }
 
     @Test func downstreamHTTPResponseErrorsKeepTheirStatus() async throws {
-        let app = makeApp(signer: signer)
-        let user = try jweUserToken(userId: "u1")
+        let app = try makeApp(signer: signer)
+        let user = ic.token(sub: "u1", clientId: "mendesky-first-party", subType: "user")
         try await app.test(.router) { client in
             let u = try await client.execute(uri: "/closed/missing", method: .get, headers: headers(user, operatorId: "u1"))
             #expect(u.status == .notFound)

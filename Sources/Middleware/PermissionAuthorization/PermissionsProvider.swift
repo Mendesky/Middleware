@@ -9,7 +9,7 @@
 
 /// Supplies the set of permission strings a user currently holds (e.g. `"audit:read"`).
 public protocol PermissionsProvider: Sendable {
-    /// - Parameter userId: trusted user id (PermissionMiddleware obtains it from the decrypted token).
+    /// - Parameter userId: trusted user id (PermissionMiddleware takes it from `Caller.current`, which the Bearer middleware sets).
     /// - Returns: the user's permissions; an empty array means "no permissions".
     func permissions(forUserId userId: String) async throws -> [String]
 }

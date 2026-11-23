@@ -5,13 +5,8 @@ import HummingbirdTesting
 import HTTPTypes
 import NIOCore
 import RegexBuilder
-#if canImport(CryptoKit)
-import CryptoKit
-#else
-import Crypto
-#endif
-import JSONWebKey
-import JSONWebEncryption
+import Logging
+import MiddlewareTesting
 @testable import Middleware
 
 // Hummingbird's router splits the path on "/" and drops empty segments (Trie+resolve.swift),
@@ -27,18 +22,8 @@ private func request(_ path: String) -> Request {
 
 private let variants = ["/a/b", "/a/b/", "//a/b", "/a//b", "/a/b//", "//a//b//"]
 
-private let recipientKey: JWK = P256.KeyAgreement.PrivateKey().jwkRepresentation
-
-private func userToken(_ userId: String) throws -> String {
-    let payload = AccessTokenPayload(authorizationId: "a", userId: userId, clientId: "c", scope: [], expiresAt: Date(timeIntervalSinceNow: 3600))
-    let jwe = try JWE(payload: try JSONEncoder().encode(payload), keyManagementAlg: .ecdhESA256KW, encryptionAlgorithm: .a256GCM, recipientKey: recipientKey)
-    return jwe.compactSerialization
-}
-
-private func bearer(_ token: String) -> HTTPFields {
-    var h = HTTPFields()
-    h[.authorization] = "Bearer \(token)"
-    return h
+private func userToken(_ userId: String) -> String {
+    ic.token(sub: userId, clientId: "mendesky-first-party", subType: "user")
 }
 
 @Suite struct PathValidatorTests {
@@ -76,30 +61,32 @@ private func bearer(_ token: String) -> HTTPFields {
 
     // MARK: end to end
 
-    private func permissionApp(provider: any PermissionsProvider) -> some ApplicationProtocol {
+    private func permissionApp(provider: any PermissionsProvider) throws -> some ApplicationProtocol {
         let rule = PermissionRule(PathValidator("/quotations/1"), methods: [.get], requires: ["business:read"])
         let router = Router()
-        router.add(middleware: PermissionMiddleware(rules: [rule], provider: provider, verification: AccessTokenVerification(recipientKey: recipientKey)!))
+        router.add(middleware: BearerTokenAuthenticationMiddleware(
+            trust: try icOcTrust(), logger: Logger(label: "test") { _ in SwiftLogNoOpLogHandler() }))
+        router.add(middleware: try PermissionMiddleware(rules: [rule], provider: provider))
         router.get("quotations/:id") { _, _ in "ok" }
         return Application(router: router)
     }
 
     @Test(arguments: ["/quotations/1", "/quotations/1/", "//quotations/1", "/quotations//1"])
     func permissionRuleForbidsCallerLackingPermission(uri: String) async throws {
-        let app = permissionApp(provider: ClosurePermissionsProvider { _ in ["other:thing"] })
-        let token = try userToken("u1")
+        let app = try permissionApp(provider: ClosurePermissionsProvider { _ in ["other:thing"] })
+        let token = userToken("u1")
         try await app.test(.router) { client in
-            let res = try await client.execute(uri: uri, method: .get, headers: bearer(token))
+            let res = try await client.execute(uri: uri, method: .get, headers: headers(token, operatorId: "u1"))
             #expect(res.status == .forbidden)
         }
     }
 
     @Test(arguments: ["/quotations/1", "/quotations/1/", "//quotations/1", "/quotations//1"])
     func permissionRuleAllowsCallerWithPermission(uri: String) async throws {
-        let app = permissionApp(provider: ClosurePermissionsProvider { _ in ["business:read"] })
-        let token = try userToken("u1")
+        let app = try permissionApp(provider: ClosurePermissionsProvider { _ in ["business:read"] })
+        let token = userToken("u1")
         try await app.test(.router) { client in
-            let res = try await client.execute(uri: uri, method: .get, headers: bearer(token))
+            let res = try await client.execute(uri: uri, method: .get, headers: headers(token, operatorId: "u1"))
             #expect(res.status == .ok)
         }
     }
@@ -108,8 +95,8 @@ private func bearer(_ token: String) -> HTTPFields {
     func whitelistedPathVariantsSkipAuthentication(uri: String) async throws {
         let router = Router()
         router.add(middleware: BearerTokenAuthenticationMiddleware(
-            verification: AccessTokenVerification(recipientKey: recipientKey)!,
-            validators: [PathValidator("/health")]))
+            trust: try icOcTrust(), validators: [PathValidator("/health")],
+            logger: Logger(label: "test") { _ in SwiftLogNoOpLogHandler() }))
         router.get("health") { _, _ in "ok" }
         router.get("secure") { _, _ in "ok" }
         let app = Application(router: router)
